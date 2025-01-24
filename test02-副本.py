@@ -4,7 +4,19 @@ import matplotlib.pyplot as plt
 import csv
 import glob
 import math
+import logging
+import pyproj
+from pyproj import Transformer
 
+# 设置日志记录
+logging.basicConfig(level=logging.DEBUG, filename='debug.log', filemode='w', format='%(asctime)s - %(levelname)s - %(message)s')
+
+# 创建一个 Transformer 对象，用于将 WGS84 坐标转换为 UTM 坐标
+transformer = Transformer.from_crs("epsg:4326", "epsg:32633")  # 这里使用 UTM zone 33N，具体 zone 需要根据实际情况调整
+
+def wgs84_to_utm(lat, lon):
+    easting, northing = transformer.transform(lat, lon)
+    return easting, northing
 
 # **********
 # Calculate true and pixel distances between features
@@ -115,7 +127,7 @@ def calibrate_camera(size):
     prev_img_shape = None
 
     images = glob.glob(
-        'r.\camera_calibration\images\*.jpg')  # TODO: change the path according to the path in your environmrnt
+        r'.\camera_calibration\images\*.jpg')  # TODO: change the path according to the path in your environmrnt
     for fname in images:
         img = cv2.imread(fname)
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
@@ -201,6 +213,8 @@ def find_homography(recs, pixels, pos3ds, symbols, camera_location, im, show, ra
         pos2[i, :] = p[0:2]
     M, mask = cv2.findHomography(pos2[good == 1], pixels[good == 1], cv2.RANSAC, ransacbound)
     M = np.linalg.inv(M)
+    logging.debug(f'Homography Matrix M: {M}')
+    logging.debug(f'Mask: {mask}')
     if show:
         print('M', M, np.sum(mask))
     if show:
@@ -210,7 +224,7 @@ def find_homography(recs, pixels, pos3ds, symbols, camera_location, im, show, ra
             symbol = rec['symbol']
             pixel = rec['pixel']
             if pixel[0] != 0 or pixel[1] != 0:
-                plt.text(pixel[0], pixel[1], symbol, color='purple', fontsize=42, weight='bold')
+                plt.text(pixel[0], pixel[1], symbol, color='purple', fontsize=12, weight='bold')
                 # plt.text(pixel[0],pixel[1],symbol, style='italic',fontsize=30, weight ='bold', bbox=dict(boxstyle="round", ec=(1., 0.5, 0.5), fc=(1., 0.8, 0.8),))
     err1 = 0
     err2 = 0
@@ -226,6 +240,7 @@ def find_homography(recs, pixels, pos3ds, symbols, camera_location, im, show, ra
         PP2 = np.matmul(M, P1)
         PP2 = PP2 / PP2[2]
         P2 = pos2[good == 1][i, :]
+        logging.debug(f'Feature {i}: mask={mask[i]}, p1={p1}, pp2={pp2[0:2]}, distance={np.linalg.norm(p1 - pp2[0:2])}')
         if show and good[i]:
             print(i)
             print(mask[i] == 1, p1, pp2[0:2], np.linalg.norm(p1 - pp2[0:2]))
@@ -235,9 +250,9 @@ def find_homography(recs, pixels, pos3ds, symbols, camera_location, im, show, ra
             err2 += np.linalg.norm(P2 - PP2[0:2])
         if show:
             color = 'green' if mask[i] == 1 else 'red'
-            plt.plot([p1[0], pp2[0]], [p1[1], pp2[1]], color=color, linewidth=5)
-            plt.plot(p1[0], p1[1], marker='X', color=color, markersize=10)
-            plt.plot(pp2[0], pp2[1], marker='o', color=color, markersize=10)
+            plt.plot([p1[0], pp2[0]], [p1[1], pp2[1]], color=color, linewidth=2)
+            plt.plot(p1[0], p1[1], marker='X', color=color, markersize=5)
+            plt.plot(pp2[0], pp2[1], marker='o', color=color, markersize=5)
             sym = ''
             name = ''
             for r in recs:
@@ -259,29 +274,29 @@ def find_homography(recs, pixels, pos3ds, symbols, camera_location, im, show, ra
             pp = np.array([pos2[i, 0], pos2[i, 1], 1.0])
             pp2 = np.matmul(np.linalg.inv(M), pp)
             pp2 = pp2 / pp2[2]
+            logging.debug(f'Unnoted Feature {i}: symbol={r["symbol"]}, pp2={pp2[0:2]}')
             if show:
-                plt.text(pp2[0], pp2[1], r['symbol'], color='black', fontsize=42, style='italic',
+                plt.text(pp2[0], pp2[1], r['symbol'], color='black', fontsize=12, style='italic',
                          weight='bold')
-                plt.plot(pp2[0], pp2[1], marker='s', markersize=10, color='black')
+                plt.plot(pp2[0], pp2[1], marker='s', markersize=5, color='black')
                 x = r['pos3d'][0]
                 y = r['pos3d'][1]
                 feature = [i, recs[i]['symbol'], recs[i]['name'], x, y, 0, 0, pp2[0], pp2[1]]
                 features.append(feature)
     if show:
-        outputCsv = output.replace(".png", "_accuracies.csv")
-        csvFile = open(outputCsv, 'w', newline='', encoding='utf-8')
-        csvWriter = csv.writer(csvFile)
-        for f in features:
-            csvWriter.writerow(f)
+        outputCsv = outputfile.replace(".jpg", "_accuracies.csv")
+        with open(outputCsv, 'w', newline='', encoding='utf-8-sig') as csvFile:
+            csvWriter = csv.writer(csvFile)
+            for f in features:
+                csvWriter.writerow(f)
 
-        # send features to the function that correlates between the feature themsrlves
+        # 发送特征到相关函数
         results = correlate_features(features, 1)
-        # get the results and write to a nother CSV file
-        outputCsv = output.replace(".png", "_correlations.csv")
-        csvFile = open(outputCsv, 'w', newline='', encoding='utf-8')
-        csvWriter = csv.writer(csvFile)
-        for r in results:
-            csvWriter.writerow(r)
+        outputCsv = outputfile.replace(".jpg", "_correlations.csv")
+        with open(outputCsv, 'w', newline='', encoding='utf-8') as csvFile:
+            csvWriter = csv.writer(csvFile)
+            for r in results:
+                csvWriter.writerow(r)
 
         print('Output file: ', outputfile)
         plt.savefig(outputfile, dpi=300)
@@ -311,20 +326,22 @@ def read_points_data(filename, pixel_x, pixel_y, scale):
             else:
                 line_count += 1
                 symbol = row[1]
+                name = row[2]
                 pixel = np.array([int(row[indx]), int(row[indy])]) / scale
                 longitude = float(row[4])
                 latitude = float(row[5])
                 elevation = float(row[6])
                 height = float(row[3]) + float(elevation)
-                pos3d = np.array([longitude, latitude, height])
-                name = row[2]
+                # 添加坐标转换
+                easting, northing = wgs84_to_utm(latitude, longitude)
+                pos3d = np.array([easting, northing, height])
 
                 rec = {'symbol': symbol,
                        'pixel': pixel,
                        'pos3d': pos3d,
                        'name': name}
                 recs.append(rec)
-        print(f'Processed {line_count} lines.')
+        logging.debug(f'Processed {line_count} lines.')
         return recs
 
 
@@ -347,11 +364,14 @@ def read_camera_locations():
                 longitude = float(row[2])
                 latitude = float(row[3])
                 height = float(row[4]) + 2.0  # addition of 2 meters  as the observer height
-                pos3d = np.array([longitude, latitude, height])
+                # 添加坐标转换
+                easting, northing = wgs84_to_utm(latitude, longitude)
+                pos3d = np.array([easting, northing, height])
+
                 rec = {'grid_code': grid_code,
                        'pos3d': pos3d}
                 recs.append(rec)
-        print(f'Processed {line_count} lines.')
+        logging.debug(f'Processed {line_count} lines.')
         return recs
 
 
@@ -375,7 +395,7 @@ def do_it(image_name, features, pixel_x, pixel_y, output, scale):
         symbol = rec['symbol']
         pixel = rec['pixel']
         if pixel[0] != 0 or pixel[1] != 0:
-            plt.text(pixel[0], pixel[1], symbol, color='red', fontsize=42)
+            plt.text(pixel[0], pixel[1], symbol, color='red', fontsize=12)
         pixels.append(pixel)
 
     num_matches12 = find_homographies(recs, locations, im, False, 120.0, output)
@@ -403,19 +423,22 @@ grid_code_min = 7
 
 if img == '1898':
     ret, mtx, dist, rvecs, tvecs = calibrate_camera(23)
-    img = cv2.imread('1898.jpg')
-    h, w = img.shape[:2]
-    newcameramtx, roi = cv2.getOptimalNewCameraMatrix(mtx, dist, (w, h), 1, (w, h))
-    dst = cv2.undistort(img, mtx, dist, None, newcameramtx)  # un-distort
-    cv2.imwrite('tmp1898.jpg', dst)
+    if ret is None:
+        logging.error("Camera calibration failed.")
+    else:
+        img = cv2.imread('1898.jpg')
+        h, w = img.shape[:2]
+        newcameramtx, roi = cv2.getOptimalNewCameraMatrix(mtx, dist, (w, h), 1, (w, h))
+        dst = cv2.undistort(img, mtx, dist, None, newcameramtx)  # un-distort
+        cv2.imwrite('tmp1898.jpg', dst)
 
-    image_name = 'tmp1898.jpg'
-    features = 'feature_points_with_annotations.csv'
-    camera_locations = 'potential_camera_locations.csv'
-    pixel_x = 'Pixel_x_1898.jpg'
-    pixel_y = 'Pixel_y_1898.jpg'
-    output = 'zOutput_1898.jpg'
-    scale = 1.0
+        image_name = 'tmp1898.jpg'
+        features = 'feature_points_with_annotations.csv'
+        camera_locations = 'potential_camera_locations.csv'
+        pixel_x = 'Pixel_x_1898.jpg'
+        pixel_y = 'Pixel_y_1898.jpg'
+        output = 'zOutput_1898.jpg'
+        scale = 1.0
 
 elif img == '0518':
     ret, mtx, dist, rvecs, tvecs = calibrate_camera(23)
