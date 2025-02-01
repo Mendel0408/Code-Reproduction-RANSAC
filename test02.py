@@ -224,7 +224,7 @@ def find_homography(recs, pixels, pos3ds, symbols, camera_location, im, show, ra
             symbol = rec['symbol']
             pixel = rec['pixel']
             if pixel[0] != 0 or pixel[1] != 0:
-                plt.text(pixel[0], pixel[1], symbol, color='purple', fontsize=12, weight='bold')
+                plt.text(pixel[0], pixel[1], symbol, color='purple', fontsize=6, weight='bold')
                 # plt.text(pixel[0],pixel[1],symbol, style='italic',fontsize=30, weight ='bold', bbox=dict(boxstyle="round", ec=(1., 0.5, 0.5), fc=(1., 0.8, 0.8),))
     err1 = 0
     err2 = 0
@@ -251,8 +251,8 @@ def find_homography(recs, pixels, pos3ds, symbols, camera_location, im, show, ra
         if show:
             color = 'green' if mask[i] == 1 else 'red'
             plt.plot([p1[0], pp2[0]], [p1[1], pp2[1]], color=color, linewidth=2)
-            plt.plot(p1[0], p1[1], marker='X', color=color, markersize=5)
-            plt.plot(pp2[0], pp2[1], marker='o', color=color, markersize=5)
+            plt.plot(p1[0], p1[1], marker='X', color=color, markersize=3)
+            plt.plot(pp2[0], pp2[1], marker='o', color=color, markersize=3)
             sym = ''
             name = ''
             for r in recs:
@@ -276,9 +276,9 @@ def find_homography(recs, pixels, pos3ds, symbols, camera_location, im, show, ra
             pp2 = pp2 / pp2[2]
             logging.debug(f'Unnoted Feature {i}: symbol={r["symbol"]}, pp2={pp2[0:2]}')
             if show:
-                plt.text(pp2[0], pp2[1], r['symbol'], color='black', fontsize=12, style='italic',
+                plt.text(pp2[0], pp2[1], r['symbol'], color='black', fontsize=6, style='italic',
                          weight='bold')
-                plt.plot(pp2[0], pp2[1], marker='s', markersize=5, color='black')
+                plt.plot(pp2[0], pp2[1], marker='s', markersize=3, color='black')
                 x = r['pos3d'][0]
                 y = r['pos3d'][1]
                 feature = [i, recs[i]['symbol'], recs[i]['name'], x, y, 0, 0, pp2[0], pp2[1]]
@@ -374,55 +374,6 @@ def read_camera_locations():
         logging.debug(f'Processed {line_count} lines.')
         return recs
 
-# **********
-# Convert pixel coordinates to WGS84 coordinates
-# **********
-def pixel_to_wgs84(pixel_x, pixel_y, homography_matrix, camera_location):
-    """
-    将像素坐标转换为WGS84坐标
-    :param pixel_x: 像素x坐标
-    :param pixel_y: 像素y坐标
-    :param homography_matrix: 单应矩阵
-    :param camera_location: 相机的3D坐标
-    :return: 经纬度（lat, lon）
-    """
-    # 像素坐标转归一化平面坐标
-    pixel = np.array([pixel_x, pixel_y, 1.0])
-    normalized_plane = np.matmul(np.linalg.inv(homography_matrix), pixel)
-    normalized_plane /= normalized_plane[2]  # 归一化
-
-    # 转换为3D世界坐标
-    world_coordinates = np.array([
-        normalized_plane[0] + camera_location[0],
-        normalized_plane[1] + camera_location[1],
-        camera_location[2]
-    ])
-
-    # 使用 Transformer 将 UTM 转换为 WGS84
-    lon, lat = transformer.transform(world_coordinates[1], world_coordinates[0])  # (northing, easting)
-    return lat, lon
-
-# **********
-# Interactive pixel-to-WGS84 conversion
-# **********
-def interactive_pixel_to_wgs84(homography_matrix, camera_location):
-    """
-    提供用户交互输入像素坐标并转换为WGS84坐标
-    :param homography_matrix: 单应矩阵
-    :param camera_location: 相机的3D坐标
-    """
-    while True:
-        user_input = input("请输入像素坐标 (格式: x,y 或 exit 退出): ").strip()
-        if user_input.lower() == "exit":
-            print("退出程序。")
-            break
-
-        try:
-            pixel_x, pixel_y = map(float, user_input.split(","))
-            lat, lon = pixel_to_wgs84(pixel_x, pixel_y, homography_matrix, camera_location)
-            print(f"像素坐标 ({pixel_x}, {pixel_y}) 转换为 WGS84 坐标: 纬度 {lat:.6f}, 经度 {lon:.6f}")
-        except Exception as e:
-            print(f"输入错误: {e}")
 
 # **********
 # Main function
@@ -444,10 +395,10 @@ def do_it(image_name, features, pixel_x, pixel_y, output, scale):
         symbol = rec['symbol']
         pixel = rec['pixel']
         if pixel[0] != 0 or pixel[1] != 0:
-            plt.text(pixel[0], pixel[1], symbol, color='red', fontsize=12)
+            plt.text(pixel[0], pixel[1], symbol, color='red', fontsize=6)
         pixels.append(pixel)
 
-    num_matches12 = find_homographies(recs, locations, im, False, 70.0, output)
+    num_matches12 = find_homographies(recs, locations, im, False, 75.0, output)
     num_matches2 = num_matches12[:, 1]
     # print(np.min(num_matches2[num_matches2 > 0]))
     # print(np.max(num_matches2[num_matches2 > 0]))
@@ -458,7 +409,8 @@ def do_it(image_name, features, pixel_x, pixel_y, output, scale):
     theloci = np.argmin(num_matches2)  # theloci contains the best location for the camera
     print('location id: ' + str(theloci) + ' - ' + str(locations[theloci]))
 
-    find_homographies(recs, [locations[theloci]], im, True, 70.0, output)  # Orig = 120.0
+    find_homographies(recs, [locations[theloci]], im, True, 75.0, output)  # Orig = 120.0
+
 
 img = '1898'
 # img = '1900-1910'
@@ -467,7 +419,7 @@ img = '1898'
 # img = '1915(2)'
 
 camera_locations = ''
-grid_code_min = 7
+grid_code_min = 0
 
 if img == '1898':
     ret, mtx, dist, rvecs, tvecs = calibrate_camera(23)
