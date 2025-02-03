@@ -441,11 +441,11 @@ if img == '1898':
         h, w = img.shape[:2]
         newcameramtx, roi = cv2.getOptimalNewCameraMatrix(mtx, dist, (w, h), 1, (w, h))
         dst = cv2.undistort(img, mtx, dist, None, newcameramtx)  # un-distort
-        cv2.imwrite('dst1898.png', dst)
+        cv2.imwrite('dst1898.jpg', dst)
 
-        image_name = 'dst1898.png'
+        image_name = 'dst1898.jpg'
         features = 'feature_points_with_annotations.csv'
-        camera_locations_file = 'potential_camera_locations.csv'
+        camera_locations = 'potential_camera_locations.csv'
         pixel_x = 'Pixel_x_1898.jpg'
         pixel_y = 'Pixel_y_1898.jpg'
         output = 'zOutput_1898.png'
@@ -462,7 +462,7 @@ elif img == '1900-1910':
 
     image_name = 'dst1900-1910.png'
     features = 'feature_points_with_annotations.csv'
-    camera_locations_file = 'potential_camera_locations.csv'
+    camera_locations = 'potential_camera_locations.csv'
     pixel_x = 'Pixel_x_1900-1910.jpg'
     pixel_y = 'Pixel_y_1900-1910.jpg'
     output = 'zOutput_1900-1910.png'
@@ -478,7 +478,7 @@ elif img == '1910':
 
     image_name = 'dst1910.png'
     features = 'feature_points_with_annotations.csv'
-    camera_locations_file = 'potential_camera_locations.csv'
+    camera_locations = 'potential_camera_locations.csv'
     pixel_x = 'Pixel_x_1910.jpg'
     pixel_y = 'Pixel_y_1910.jpg'
     output = 'zOutput_1910.png'
@@ -488,7 +488,7 @@ elif img == '1910':
 elif img == '1912s':
     image_name = '1912s.jpg'
     features = 'feature_points_with_annotations.csv'
-    camera_locations_file = 'potential_camera_locations.csv'
+    camera_locations = 'potential_camera_locations.csv'
     pixel_x = 'Pixel_x_1912s.jpg'
     pixel_y = 'Pixel_y_1912s.jpg'
     output = 'zOutput_1912s.png'
@@ -498,7 +498,7 @@ elif img == '1912s':
 elif img == '1915 (2)':
     image_name = '1915 (2).jpg'
     features = 'feature_points_with_annotations.csv'
-    camera_locations_file = 'potential_camera_locations.csv'
+    camera_locations = 'potential_camera_locations.csv'
     pixel_x = 'Pixel_x_1915 (2).jpg'
     pixel_y = 'Pixel_y_1915 (2).jpg'
     output = 'zOutput_1915 (2).png'
@@ -508,7 +508,7 @@ elif img == '1915 (2)':
 elif img == '1915':
     image_name = '1915.jpg'
     features = 'feature_points_with_annotations.csv'
-    camera_locations_file = 'potential_camera_locations.csv'
+    camera_locations = 'potential_camera_locations.csv'
     pixel_x = 'Pixel_x_1915.jpg'
     pixel_y = 'Pixel_y_1915.jpg'
     output = 'zOutput_1915.png'
@@ -518,7 +518,7 @@ elif img == '1915':
 elif img == '1920-1930':
     image_name = '1920-1930.jpg'
     features = 'feature_points_with_annotations.csv'
-    camera_locations_file = 'potential_camera_locations.csv'
+    camera_locations = 'potential_camera_locations.csv'
     pixel_x = 'Pixel_x_1920-1930.jpg'
     pixel_y = 'Pixel_y_1920-1930.jpg'
     output = 'zOutput_1920-1930.png'
@@ -528,7 +528,7 @@ elif img == '1920-1930':
 elif img == '1925-1930':
     image_name = '1925-1930.jpg'
     features = 'feature_points_with_annotations.csv'
-    camera_locations_file = 'potential_camera_locations.csv'
+    camera_locations = 'potential_camera_locations.csv'
     pixel_x = 'Pixel_x_1925-1930.jpg'
     pixel_y = 'Pixel_y_1925-1930.jpg'
     output = 'zOutput_1925-1930.png'
@@ -538,7 +538,7 @@ elif img == '1925-1930':
 elif img == '1930':
     image_name = '1930.jpg'
     features = 'feature_points_with_annotations.csv'
-    camera_locations_file = 'potential_camera_locations.csv'
+    camera_locations = 'potential_camera_locations.csv'
     pixel_x = 'Pixel_x_1930.jpg'
     pixel_y = 'Pixel_y_1930.jpg'
     output = 'zOutput_1930.png'
@@ -548,7 +548,7 @@ elif img == '1930':
 elif img == 'center of the settlement kuliang':
     image_name = 'center of the settlement kuliang.jpg'
     features = 'feature_points_with_annotations.csv'
-    camera_locations_file = 'potential_camera_locations.csv'
+    camera_locations = 'potential_camera_locations.csv'
     pixel_x = 'Pixel_x_center of the settlement kuliang.jpg'
     pixel_y = 'Pixel_y_center of the settlement kuliang.jpg'
     output = 'zOutput_center of the settlement kuliang.png'
@@ -558,7 +558,7 @@ elif img == 'center of the settlement kuliang':
 elif img == 'kuliang hills':
     image_name = 'kuliang hills.jpg'
     features = 'feature_points_with_annotations.csv'
-    camera_locations_file = 'potential_camera_locations.csv'
+    camera_locations = 'potential_camera_locations.csv'
     pixel_x = 'Pixel_x_kuliang hills.jpg'
     pixel_y = 'Pixel_y_kuliang hills.jpg'
     output = 'zOutput_kuliang hills.png'
@@ -568,7 +568,7 @@ elif img == 'kuliang hills':
 elif img == 'kuliang panorama central segment':
     image_name = 'kuliang panorama central segment.jpg'
     features = 'feature_points_with_annotations.csv'
-    camera_locations_file = 'potential_camera_locations.csv'
+    camera_locations = 'potential_camera_locations.csv'
     pixel_x = 'Pixel_x_kuliang panorama central segment.jpg'
     pixel_y = 'Pixel_y_kuliang panorama central segment.jpg'
     output = 'zOutput_kuliang panorama central segment.png'
@@ -578,7 +578,7 @@ elif img == 'kuliang panorama central segment':
 elif img == 'kuliang Pine Crag road':
     image_name = 'kuliang Pine Crag road.jpg'
     features = 'feature_points_with_annotations.csv'
-    camera_locations_file = 'potential_camera_locations.csv'
+    camera_locations = 'potential_camera_locations.csv'
     pixel_x = 'Pixel_x_kuliang Pine Crag road.jpg'
     pixel_y = 'Pixel_y_kuliang Pine Crag road.jpg'
     output = 'zOutput_kuliang Pine Crag road.png'
@@ -588,7 +588,7 @@ elif img == 'kuliang Pine Crag road':
 elif img == 'Siems Siemssen':
     image_name = 'Siems Siemssen.jpg'
     features = 'feature_points_with_annotations.csv'
-    camera_locations_file = 'potential_camera_locations.csv'
+    camera_locations = 'potential_camera_locations.csv'
     pixel_x = 'Pixel_x_Siems Siemssen.jpg'
     pixel_y = 'Pixel_y_Siems Siemssen.jpg'
     output = 'zOutput_Siems Siemssen.png'
@@ -598,7 +598,7 @@ elif img == 'Siems Siemssen':
 elif img == 'View Kuliang includes tennis courts':
     image_name = 'View Kuliang includes tennis courts.jpg'
     features = 'feature_points_with_annotations.csv'
-    camera_locations_file = 'potential_camera_locations.csv'
+    camera_locations = 'potential_camera_locations.csv'
     pixel_x = 'Pixel_x_View Kuliang includes tennis courts.jpg'
     pixel_y = 'Pixel_y_View Kuliang includes tennis courts.jpg'
     output = 'zOutput_View Kuliang includes tennis courts.png'
@@ -608,7 +608,7 @@ elif img == 'View Kuliang includes tennis courts':
 elif img == 'Worley Family-20':
     image_name = 'Worley Family-20.jpg'
     features = 'feature_points_with_annotations.csv'
-    camera_locations_file = 'potential_camera_locations.csv'
+    camera_locations = 'potential_camera_locations.csv'
     pixel_x = 'Pixel_x_Worley Family-20.jpg'
     pixel_y = 'Pixel_y_Worley Family-20.jpg'
     output = 'zOutput_Worley Family-20.png'
