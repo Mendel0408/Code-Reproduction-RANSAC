@@ -7,12 +7,15 @@ import math
 import logging
 import pyproj
 from pyproj import Transformer
+import pandas as pd
+import seaborn as sns
+import plotly.express as px
 
 # 设置日志记录
 logging.basicConfig(level=logging.DEBUG, filename='debug.log', filemode='w', format='%(asctime)s - %(levelname)s - %(message)s')
 
 # 创建一个 Transformer 对象，用于将 WGS84 坐标转换为 UTM 坐标
-transformer = Transformer.from_crs("epsg:4326", "epsg:32633")  # 这里使用 UTM zone 33N，具体 zone 需要根据实际情况调整
+transformer = Transformer.from_crs("epsg:4326", "epsg:32650")  # 这里使用 UTM zone 33N，具体 zone 需要根据实际情况调整
 
 def wgs84_to_utm(lat, lon):
     easting, northing = transformer.transform(lat, lon)
@@ -153,6 +156,51 @@ def calibrate_camera(size):
 
     return ret, mtx, dist, rvecs, tvecs
 
+# 定义可视化函数
+def visualize_accuracies(csv_file):
+    accuracies_df = pd.read_csv(csv_file)
+    accuracies_df[['pixel_x', 'pixel_y', 'calc_pixel_x', 'calc_pixel_y']] = accuracies_df[['pixel_x', 'pixel_y', 'calc_pixel_x', 'calc_pixel_y']].astype(float)
+    plt.figure(figsize=(10, 6))
+    plt.scatter(accuracies_df['pixel_x'], accuracies_df['pixel_y'], c='blue', label='Actual Position')
+    plt.scatter(accuracies_df['calc_pixel_x'], accuracies_df['calc_pixel_y'], c='red', marker='x', label='Calculated Position')
+    plt.legend()
+    plt.xlabel('Pixel X')
+    plt.ylabel('Pixel Y')
+    plt.title('Feature Points Actual vs Calculated Positions')
+    plt.show()
+    accuracies_df['error'] = ((accuracies_df['pixel_x'] - accuracies_df['calc_pixel_x'])**2 +
+                              (accuracies_df['pixel_y'] - accuracies_df['calc_pixel_y'])**2)**0.5
+    plt.figure(figsize=(10, 6))
+    sns.histplot(accuracies_df['error'], bins=30, kde=True)
+    plt.xlabel('Error Distance')
+    plt.ylabel('Frequency')
+    plt.title('Distribution of Error Distances')
+    plt.show()
+
+def visualize_correlations(csv_file):
+    correlations_df = pd.read_csv(csv_file)
+    correlations_df[['dis_m', 'dis_pix', 'dis_c_pix', 'dis_depth_pix', 'dis_depth_c_pix', 'bear_pix', 'bear_c_pix']] = correlations_df[['dis_m', 'dis_pix', 'dis_c_pix', 'dis_depth_pix', 'dis_depth_c_pix', 'bear_pix', 'bear_c_pix']].astype(float)
+    plt.figure(figsize=(12, 8))
+    distance_corr_matrix = correlations_df[['dis_m', 'dis_pix', 'dis_c_pix', 'dis_depth_pix', 'dis_depth_c_pix']].corr()
+    sns.heatmap(distance_corr_matrix, annot=True, cmap='coolwarm', vmin=-1, vmax=1)
+    plt.title('Correlation Matrix of Distances')
+    plt.show()
+    plt.figure(figsize=(12, 8))
+    angle_corr_matrix = correlations_df[['bear_pix', 'bear_c_pix']].corr()
+    sns.heatmap(angle_corr_matrix, annot=True, cmap='coolwarm', vmin=-1, vmax=1)
+    plt.title('Correlation Matrix of Angles')
+    plt.show()
+
+def visualize_camera_locations(csv_file):
+    location_df = pd.read_csv(csv_file)
+    location_df[['min_score', 'max_score', 'Z', 'X', 'Y']] = location_df[['min_score', 'max_score', 'Z', 'X', 'Y']].astype(float)
+    fig = px.scatter_3d(location_df, x='X', y='Y', z='Z', color='min_score',
+                        size='max_score', hover_data=['location_id', 'grid_code'])
+    fig.update_layout(title='Camera Locations with Scores',
+                      scene=dict(xaxis_title='X Coordinate',
+                                 yaxis_title='Y Coordinate',
+                                 zaxis_title='Z Coordinate'))
+    fig.show()
 
 # **********
 # Find homographies function
@@ -188,13 +236,14 @@ def find_homographies(recs, camera_locations, im, show, ransacbound, outputfile)
         score = [i + 1, num_matches[i, 0], num_matches[i, 1], grids[i], loc3ds[i][0], loc3ds[i][1], loc3ds[i][2]]
         scores.append(score)
 
-    if show is False:
-        outputCsv = output.replace(".jpg", "_location.csv")
-        csvFile = open(outputCsv, 'w', newline='', encoding='utf-8')
-        csvWriter = csv.writer(csvFile)
-        csvWriter.writerow(['location_id', 'min_score', 'max_score', 'grid_code', 'Z', 'X', 'Y'])
-        for s in scores:
-            csvWriter.writerow(s)
+    if not show:
+        outputCsv = outputfile.replace(".jpg", "_location.csv")
+        with open(outputCsv, 'w', newline='', encoding='utf-8') as csvFile:
+            csvWriter = csv.writer(csvFile)
+            csvWriter.writerow(['location_id', 'min_score', 'max_score', 'grid_code', 'Z', 'X', 'Y'])
+            for s in scores:
+                csvWriter.writerow(s)
+        visualize_camera_locations(outputCsv)
 
     return num_matches
 
@@ -289,14 +338,16 @@ def find_homography(recs, pixels, pos3ds, symbols, camera_location, im, show, ra
             csvWriter = csv.writer(csvFile)
             for f in features:
                 csvWriter.writerow(f)
+        visualize_accuracies(outputCsv)
 
-        # 发送特征到相关函数
         results = correlate_features(features, 1)
         outputCsv = outputfile.replace(".jpg", "_correlations.csv")
         with open(outputCsv, 'w', newline='', encoding='utf-8') as csvFile:
             csvWriter = csv.writer(csvFile)
             for r in results:
                 csvWriter.writerow(r)
+        visualize_correlations(outputCsv)
+
 
         print('Output file: ', outputfile)
         plt.savefig(outputfile, dpi=300)
@@ -411,12 +462,31 @@ def do_it(image_name, features, pixel_x, pixel_y, output, scale):
 
     find_homographies(recs, [locations[theloci]], im, True, 75.0, output)  # Orig = 120.0
 
+def process_and_visualize(outputfile, recs, camera_locations, img):
+    num_matches = find_homographies(recs, camera_locations, img, show=True, ransacbound=5, outputfile=outputfile)
+    output_accuracies_csv = outputfile.replace(".png", "_accuracies.csv")
+    output_correlations_csv = outputfile.replace(".png", "_correlations.csv")
+    output_location_csv = outputfile.replace(".png", "_location.csv")
+    visualize_accuracies(output_accuracies_csv)
+    visualize_correlations(output_correlations_csv)
+    visualize_camera_locations(output_location_csv)
 
 img = '1898'
 # img = '1900-1910'
 # img = '1910'
 # img = '1912s'
-# img = '1915(2)'
+# img = '1915 (2)'
+# img = '1915'
+# img = '1920-1930'
+# img = '1925-1930'
+# img = '1930'
+# img = 'center of the settlement kuliang'
+# img = 'kuliang hills'
+# img = 'kuliang panorama central segment'
+# img = 'kuliang Pine Crag road'
+# img = 'Siems Siemssen'
+# img = 'View Kuliang includes tennis courts'
+# img = 'Worley Family-20'
 
 camera_locations = ''
 grid_code_min = 0
@@ -430,64 +500,153 @@ if img == '1898':
         h, w = img.shape[:2]
         newcameramtx, roi = cv2.getOptimalNewCameraMatrix(mtx, dist, (w, h), 1, (w, h))
         dst = cv2.undistort(img, mtx, dist, None, newcameramtx)  # un-distort
-        cv2.imwrite('tmp1898.jpg', dst)
+        cv2.imwrite('dst1898.png', dst)
 
-        image_name = 'tmp1898.jpg'
+        image_name = 'dst1898.png'
         features = 'feature_points_with_annotations.csv'
         camera_locations = 'potential_camera_locations.csv'
         pixel_x = 'Pixel_x_1898.jpg'
         pixel_y = 'Pixel_y_1898.jpg'
-        output = 'zOutput_1898.jpg'
+        output = 'zOutput_1898.png'
         scale = 1.0
 
-elif img == '0518':
+        process_and_visualize(output, recs, locations, dst)
+
+elif img == '1900-1910':
     ret, mtx, dist, rvecs, tvecs = calibrate_camera(23)
-    img = cv2.imread('DSC_0518.tif')
+    img = cv2.imread('1900-1910.jpg')
     h, w = img.shape[:2]
     newcameramtx, roi = cv2.getOptimalNewCameraMatrix(mtx, dist, (w, h), 1, (w, h))
     dst = cv2.undistort(img, mtx, dist, None, newcameramtx)  # un-distort
-    cv2.imwrite('tmpDSC_0518.png', dst)
+    cv2.imwrite('dst1900-1910.png', dst)
 
-    image_name = 'tmpDSC_0518.png'
-    features = 'features.csv'
-    camera_locations = 'potential_camera_locations_3D.csv'
-    pixel_x = 'Pixel_x_DSC_0518'
-    pixel_y = 'Pixel_y_DSC_0518'
-    output = 'zOutput_DSC_0518.png'
-    scale = 1.0
-elif img == 'Henn':
-    image_name = 'NNL_Henniker.jpg'
-    features = 'features.csv'
-    camera_locations = 'potential_camera_locations_3D.csv'
-    pixel_x = 'Pixel_x_Henniker'
-    pixel_y = 'Pixel_y_Henniker'
-    output = 'zOutput_Henniker.png'
+    image_name = 'dst1900-1910.png'
+    features = 'feature_points_with_annotations.csv'
+    camera_locations = 'potential_camera_locations.csv'
+    pixel_x = 'Pixel_x_1900-1910.jpg'
+    pixel_y = 'Pixel_y_1900-1910.jpg'
+    output = 'zOutput_1900-1910.png'
     scale = 1.0
 
-elif img == 'Broyn':
-    image_name = 'de-broyn-1698.tif'
-    features = 'features.csv'
-    camera_locations = 'potential_camera_locations_3D.csv'
-    pixel_x = 'Pixel_x_Broyin'
-    pixel_y = 'Pixel_y_Broyin'
-    output = 'zOutput_Broyin.png'
+elif img == '1910':
+    ret, mtx, dist, rvecs, tvecs = calibrate_camera(23)
+    img = cv2.imread('1910.jpg')
+    h, w = img.shape[:2]
+    newcameramtx, roi = cv2.getOptimalNewCameraMatrix(mtx, dist, (w, h), 1, (w, h))
+    dst = cv2.undistort(img, mtx, dist, None, newcameramtx)  # un-distort
+    cv2.imwrite('dst1910.png', dst)
+
+    image_name = 'dst1910.png'
+    features = 'feature_points_with_annotations.csv'
+    camera_locations = 'potential_camera_locations.csv'
+    pixel_x = 'Pixel_x_1910.jpg'
+    pixel_y = 'Pixel_y_1910.jpg'
+    output = 'zOutput_1910.png'
     scale = 1.0
-elif img == 'Tirion':
-    image_name = 'Tirion-1732.tif'
-    features = 'features.csv'
-    camera_locations = 'potential_camera_locations_3D.csv'
-    pixel_x = 'Pixel_x_Tirion'
-    pixel_y = 'Pixel_y_Tirion'
-    output = 'zOutput_Tirion.png'
+
+elif img == '1912s':
+    image_name = '1912s.jpg'
+    features = 'feature_points_with_annotations.csv'
+    camera_locations = 'potential_camera_locations.csv'
+    pixel_x = 'Pixel_x_1912s.jpg'
+    pixel_y = 'Pixel_y_1912s.jpg'
+    output = 'zOutput_1912s.png'
     scale = 1.0
-elif img == 'Laboard_b':
-    image_name = 'laboard_before.tif'
-    features = 'features_tiberias.csv'
-    camera_locations = 'potential_camera_locations_tiberias_3D.csv'
-    pixel_x = 'Pixel_x_Laboard_b'
-    pixel_y = 'Pixel_y_Laboard_b'
-    output = 'zOutput_Laboard_b.png'
+elif img == '1915 (2)':
+    image_name = '1915 (2).jpg'
+    features = 'feature_points_with_annotations.csv'
+    camera_locations = 'potential_camera_locations.csv'
+    pixel_x = 'Pixel_x_1915 (2).jpg'
+    pixel_y = 'Pixel_y_1915 (2).jpg'
+    output = 'zOutput_1915 (2).png'
     scale = 1.0
+elif img == '1915':
+    image_name = '1915.jpg'
+    features = 'feature_points_with_annotations.csv'
+    camera_locations = 'potential_camera_locations.csv'
+    pixel_x = 'Pixel_x_1915.jpg'
+    pixel_y = 'Pixel_y_1915.jpg'
+    output = 'zOutput_1915.png'
+    scale = 1.0
+elif img == '1920-1930':
+    image_name = '1920-1930.jpg'
+    features = 'feature_points_with_annotations.csv'
+    camera_locations = 'potential_camera_locations.csv'
+    pixel_x = 'Pixel_x_1920-1930.jpg'
+    pixel_y = 'Pixel_y_1920-1930.jpg'
+    output = 'zOutput_1920-1930.png'
+    scale = 1.0
+elif img == '1925-1930':
+    image_name = '1925-1930.jpg'
+    features = 'feature_points_with_annotations.csv'
+    camera_locations = 'potential_camera_locations.csv'
+    pixel_x = 'Pixel_x_1925-1930.jpg'
+    pixel_y = 'Pixel_y_1925-1930.jpg'
+    output = 'zOutput_1925-1930.png'
+    scale = 1.0
+elif img == '1930':
+    image_name = '1930.jpg'
+    features = 'feature_points_with_annotations.csv'
+    camera_locations = 'potential_camera_locations.csv'
+    pixel_x = 'Pixel_x_1930.jpg'
+    pixel_y = 'Pixel_y_1930.jpg'
+    output = 'zOutput_1930.png'
+    scale = 1.0
+elif img == 'center of the settlement kuliang':
+    image_name = 'center of the settlement kuliang.jpg'
+    features = 'feature_points_with_annotations.csv'
+    camera_locations = 'potential_camera_locations.csv'
+    pixel_x = 'Pixel_x_center of the settlement kuliang.jpg'
+    pixel_y = 'Pixel_y_center of the settlement kuliang.jpg'
+    output = 'zOutput_center of the settlement kuliang.png'
+    scale = 1.0
+elif img == 'kuliang hills':
+    image_name = 'kuliang hills.jpg'
+    features = 'feature_points_with_annotations.csv'
+    camera_locations = 'potential_camera_locations.csv'
+    pixel_x = 'Pixel_x_kuliang hills.jpg'
+    pixel_y = 'Pixel_y_kuliang hills.jpg'
+    output = 'zOutput_kuliang hills.png'
+    scale = 1.0
+elif img == 'kuliang panorama central segment':
+    image_name = 'kuliang panorama central segment.jpg'
+    features = 'feature_points_with_annotations.csv'
+    camera_locations = 'potential_camera_locations.csv'
+    pixel_x = 'Pixel_x_kuliang panorama central segment.jpg'
+    pixel_y = 'Pixel_y_kuliang panorama central segment.jpg'
+    output = 'zOutput_kuliang panorama central segment.png'
+    scale = 1.0
+elif img == 'kuliang Pine Crag road':
+    image_name = 'kuliang Pine Crag road.jpg'
+    features = 'feature_points_with_annotations.csv'
+    camera_locations = 'potential_camera_locations.csv'
+    pixel_x = 'Pixel_x_kuliang Pine Crag road.jpg'
+    pixel_y = 'Pixel_y_kuliang Pine Crag road.jpg'
+    output = 'zOutput_kuliang Pine Crag road.png'
+    scale = 1.0
+elif img == 'Siems Siemssen':
+    image_name = 'Siems Siemssen.jpg'
+    features = 'feature_points_with_annotations.csv'
+    camera_locations = 'potential_camera_locations.csv'
+    pixel_x = 'Pixel_x_Siems Siemssen.jpg'
+    pixel_y = 'Pixel_y_Siems Siemssen.jpg'
+    output = 'zOutput_Siems Siemssen.png'
+    scale = 1.0
+elif img == 'View Kuliang includes tennis courts':
+    image_name = 'View Kuliang includes tennis courts.jpg'
+    features = 'feature_points_with_annotations.csv'
+    camera_locations = 'potential_camera_locations.csv'
+    pixel_x = 'Pixel_x_View Kuliang includes tennis courts.jpg'
+    pixel_y = 'Pixel_y_View Kuliang includes tennis courts.jpg'
+    output = 'zOutput_View Kuliang includes tennis courts.png'
+elif img == 'Worley Family-20':
+    image_name = 'Worley Family-20.jpg'
+    features = 'feature_points_with_annotations.csv'
+    camera_locations = 'potential_camera_locations.csv'
+    pixel_x = 'Pixel_x_Worley Family-20.jpg'
+    pixel_y = 'Pixel_y_Worley Family-20.jpg'
+    output = 'zOutput_Worley Family-20.png'
+
 else:
     print('No file was selected')
 
