@@ -399,8 +399,8 @@ def read_points_data(filename, pixel_x, pixel_y, scale):
 # **********
 # read data from the potential camera locations file
 # **********
-def read_camera_locations():
-    with open(camera_locations, encoding='utf-8') as csv_file:
+def read_camera_locations(filename):
+    with open(filename, encoding='utf-8') as csv_file:
         csv_reader = csv.reader(csv_file, delimiter=',')
         line_count = 0
         recs = []
@@ -429,7 +429,8 @@ def read_camera_locations():
 # **********
 # Main function
 # **********
-def do_it(image_name, features, pixel_x, pixel_y, output, scale):
+def process_image(image_name, features, pixel_x, pixel_y, output, scale, camera_locations_file):
+    # 图像预处理
     im = cv2.imread(image_name)
     im2 = np.copy(im)
     im[:, :, 0] = im2[:, :, 2]
@@ -440,7 +441,7 @@ def do_it(image_name, features, pixel_x, pixel_y, output, scale):
     plt.imshow(im)
 
     recs = read_points_data(features, pixel_x, pixel_y, scale)
-    locations = read_camera_locations()
+    locations = read_camera_locations(camera_locations_file)
     pixels = []
     for rec in recs:
         symbol = rec['symbol']
@@ -451,8 +452,6 @@ def do_it(image_name, features, pixel_x, pixel_y, output, scale):
 
     num_matches12 = find_homographies(recs, locations, im, False, 75.0, output)
     num_matches2 = num_matches12[:, 1]
-    # print(np.min(num_matches2[num_matches2 > 0]))
-    # print(np.max(num_matches2[num_matches2 > 0]))
 
     num_matches2[num_matches2 == 0] = 1000000
     print(np.min(num_matches2))
@@ -461,6 +460,9 @@ def do_it(image_name, features, pixel_x, pixel_y, output, scale):
     print('location id: ' + str(theloci) + ' - ' + str(locations[theloci]))
 
     find_homographies(recs, [locations[theloci]], im, True, 75.0, output)  # Orig = 120.0
+
+    # 可视化处理
+    process_and_visualize(output, recs, locations, im)
 
 def process_and_visualize(outputfile, recs, camera_locations, img):
     num_matches = find_homographies(recs, camera_locations, img, show=True, ransacbound=5, outputfile=outputfile)
@@ -504,13 +506,13 @@ if img == '1898':
 
         image_name = 'dst1898.png'
         features = 'feature_points_with_annotations.csv'
-        camera_locations = 'potential_camera_locations.csv'
+        camera_locations_file = 'potential_camera_locations.csv'
         pixel_x = 'Pixel_x_1898.jpg'
         pixel_y = 'Pixel_y_1898.jpg'
         output = 'zOutput_1898.png'
         scale = 1.0
 
-        process_and_visualize(output, recs, locations, dst)
+        process_image(image_name, features, pixel_x, pixel_y, output, scale, camera_locations_file)
 
 elif img == '1900-1910':
     ret, mtx, dist, rvecs, tvecs = calibrate_camera(23)
@@ -663,5 +665,5 @@ print('**********************')
 # print(rvecs)
 # print ('tvecs: ')
 # print(tvecs)
-
+logging.debug("Script execution completed")
 print('Done!')
