@@ -1,12 +1,23 @@
+# -*- coding: utf-8 -*-
+
 import numpy as np
 import cv2
 import matplotlib.pyplot as plt
+from matplotlib import font_manager
 import csv
 import glob
 import math
 import logging
 import pyproj
 from pyproj import Transformer
+
+# 设置字体
+plt.rcParams['font.sans-serif'] = ['SimHei']  # 使用黑体
+plt.rcParams['axes.unicode_minus'] = False  # 解决负号 '-' 显示为方块的问题
+
+# 验证字体是否存在
+font_path = font_manager.findSystemFonts(fontpaths=None, fontext='ttf')
+print("Available fonts:", font_path)
 
 # 设置日志记录
 logging.basicConfig(level=logging.DEBUG, filename='debug.log', filemode='w', format='%(asctime)s - %(levelname)s - %(message)s')
@@ -17,6 +28,101 @@ transformer = Transformer.from_crs("epsg:4326", "epsg:32633")  # 这里使用 UT
 def wgs84_to_utm(lat, lon):
     easting, northing = transformer.transform(lat, lon)
     return easting, northing
+
+def plot_error_histogram(errors, title='误差频率图'):
+    plt.figure(figsize=(10, 6))
+    plt.hist(errors, bins=30, alpha=0.75, color='blue', edgecolor='black')
+    plt.title(title)
+    plt.xlabel('误差大小')
+    plt.ylabel('频率')
+    plt.grid(True)
+    plt.show()
+
+def plot_camera_location_scores(scores):
+    scores = np.array(scores)
+    # 将X、Y坐标转换为经纬度坐标（WGS84）
+    transformer_to_wgs84 = Transformer.from_crs("epsg:32633", "epsg:4326")
+    latitudes, longitudes = transformer_to_wgs84.transform(scores[:, 4], scores[:, 5])
+    plt.figure(figsize=(12, 8))
+    # 绘制 min_score 的散点图，越小的误差颜色越深
+    scatter = plt.scatter(longitudes, latitudes, c=scores[:, 1], cmap='viridis_r', marker='o')
+    plt.colorbar(scatter, label='最小匹配误差 (min_score)')
+    plt.title('潜在相机位置得分图')
+    plt.xlabel('经度')
+    plt.ylabel('纬度')
+    plt.grid(True)
+    plt.show()
+
+
+def plot_camera_pose(camera_locations, best_location_idx):
+    fig = plt.figure()
+    ax = fig.add_subplot(111, projection='3d')
+    loc3ds = np.array([loc['pos3d'] for loc in camera_locations])
+    # 将X、Y坐标转换为经纬度坐标（WGS84）
+    transformer_to_wgs84 = Transformer.from_crs("epsg:32633", "epsg:4326")
+    latitudes, longitudes = transformer_to_wgs84.transform(loc3ds[:, 0], loc3ds[:, 1])
+    ax.scatter(longitudes, latitudes, loc3ds[:, 2], c='blue', marker='o')
+    ax.scatter(longitudes[best_location_idx], latitudes[best_location_idx], loc3ds[best_location_idx, 2], c='red',
+               marker='^')
+    ax.set_title('相机位姿图')
+    ax.set_xlabel('经度')
+    ax.set_ylabel('纬度')
+    ax.set_zlabel('高度')
+    plt.show()
+
+def plot_error_boxplot(errors):
+    plt.figure(figsize=(10, 6))
+    plt.boxplot(errors, vert=True, patch_artist=True)
+    plt.title('误差分布箱线图')
+    plt.ylabel('误差大小')
+    plt.grid(True)
+    plt.show()
+
+def plot_distance_histogram(distances):
+    plt.figure(figsize=(10, 6))
+    plt.hist(distances, bins=30, alpha=0.75, color='green', edgecolor='black')
+    plt.title('距离度量直方图')
+    plt.xlabel('距离大小')
+    plt.ylabel('频率')
+    plt.grid(True)
+    plt.show()
+
+
+def plot_angle_rose(angles):
+    plt.figure(figsize=(10, 6))
+    plt.subplot(projection='polar')
+    plt.hist(angles, bins=30, alpha=0.75, color='purple', edgecolor='black')
+    plt.title('角度度量玫瑰图')
+    plt.show()
+
+
+def plot_nearest_neighbor_distances(nearest_neighbor_distances):
+    plt.figure(figsize=(10, 6))
+    plt.hist(nearest_neighbor_distances, bins=30, alpha=0.75, color='orange', edgecolor='black')
+    plt.title('特征点最近邻距离图')
+    plt.xlabel('距离大小')
+    plt.ylabel('频率')
+    plt.grid(True)
+    plt.show()
+
+def plot_homography_matrix_heatmap(H):
+    plt.figure(figsize=(10, 6))
+    sns.heatmap(H, annot=True, cmap='coolwarm', vmin=-1, vmax=1)
+    plt.title('单应性矩阵热图')
+    plt.show()
+
+
+def plot_ransac_scatter(inliers, outliers):
+    plt.figure(figsize=(10, 6))
+    plt.scatter(inliers[:, 0], inliers[:, 1], c='green', marker='o', label='内点')
+    plt.scatter(outliers[:, 0], outliers[:, 1], c='red', marker='x', label='外点')
+    plt.title('RANSAC算法散点图')
+    plt.xlabel('X 坐标')
+    plt.ylabel('Y 坐标')
+    plt.legend()
+    plt.grid(True)
+    plt.show()
+
 
 # **********
 # Calculate true and pixel distances between features
@@ -196,35 +302,10 @@ def find_homographies(recs, camera_locations, im, show, ransacbound, outputfile)
         for s in scores:
             csvWriter.writerow(s)
 
-    return num_matches
     plot_camera_location_scores(scores)
-    plot_camera_pose(camera_locations, theloci)
+    plot_camera_pose(camera_locations, np.argmin(num_matches[:, 1]))
 
-def plot_camera_location_scores(scores):
-    scores = np.array(scores)
-    plt.figure(figsize=(12, 8))
-    # 绘制 min_score 的散点图，越小的误差颜色越深
-    scatter = plt.scatter(scores[:, 4], scores[:, 5], c=scores[:, 1], cmap='viridis_r', marker='o')
-    plt.colorbar(scatter, label='最小匹配误差 (min_score)')
-    plt.title('潜在相机位置得分图')
-    plt.xlabel('X 坐标')
-    plt.ylabel('Y 坐标')
-    plt.grid(True)
-    plt.show()
-
-
-def plot_camera_pose(camera_locations, best_location_idx):
-    fig = plt.figure()
-    ax = fig.add_subplot(111, projection='3d')
-    loc3ds = np.array([loc['pos3d'] for loc in camera_locations])
-    ax.scatter(loc3ds[:, 0], loc3ds[:, 1], loc3ds[:, 2], c='blue', marker='o')
-    ax.scatter(loc3ds[best_location_idx, 0], loc3ds[best_location_idx, 1], loc3ds[best_location_idx, 2], c='red', marker='^')
-    ax.set_title('相机位姿图')
-    ax.set_xlabel('X 坐标')
-    ax.set_ylabel('Y 坐标')
-    ax.set_zlabel('Z 坐标')
-    plt.show()
-
+    return num_matches
 
 # **********
 # Find homography function
@@ -325,40 +406,21 @@ def find_homography(recs, pixels, pos3ds, symbols, camera_location, im, show, ra
             for r in results:
                 csvWriter.writerow(r)
 
-        def plot_distance_histogram(distances):
-            plt.figure(figsize=(10, 6))
-            plt.hist(distances, bins=30, alpha=0.75, color='green', edgecolor='black')
-            plt.title('距离度量直方图')
-            plt.xlabel('距离大小')
-            plt.ylabel('频率')
-            plt.grid(True)
-            plt.show()
-        distances = [math.sqrt(math.pow(int(f1[3]) - int(f2[3]), 2) + math.pow(int(f1[4]) - int(f2[4]), 2)) for f1 in
-                     features for f2 in features if f1 != f2]
-        plot_distance_histogram(distances)
-
-        def plot_angle_rose(angles):
-            plt.figure(figsize=(10, 6))
-            plt.subplot(projection='polar')
-            plt.hist(angles, bins=30, alpha=0.75, color='purple', edgecolor='black')
-            plt.title('角度度量玫瑰图')
-            plt.show()
-        angles = [calc_bearing(f1[5], f1[6], f2[5], f2[6]) for f1 in features for f2 in features if f1 != f2]
-        plot_angle_rose(angles)
-
-        def plot_nearest_neighbor_distances(nearest_neighbor_distances):
-            plt.figure(figsize=(10, 6))
-            plt.hist(nearest_neighbor_distances, bins=30, alpha=0.75, color='orange', edgecolor='black')
-            plt.title('特征点最近邻距离图')
-            plt.xlabel('距离大小')
-            plt.ylabel('频率')
-            plt.grid(True)
-            plt.show()
+        plot_distance_histogram(
+            [math.sqrt(math.pow(int(f1[3]) - int(f2[3]), 2) + math.pow(int(f1[4]) - int(f2[4]), 2)) for f1 in features
+             for f2 in features if f1 != f2])
+        plot_angle_rose([calc_bearing(f1[5], f1[6], f2[5], f2[6]) for f1 in features for f2 in features if f1 != f2])
         points = np.array([[f[5], f[6]] for f in features])
         dist_matrix = distance.cdist(points, points, 'euclidean')
         np.fill_diagonal(dist_matrix, np.inf)
-        nearest_neighbor_distances = np.min(dist_matrix, axis=1)
-        plot_nearest_neighbor_distances(nearest_neighbor_distances)
+        plot_nearest_neighbor_distances(np.min(dist_matrix, axis=1))
+        plot_error_histogram([err1], '误差频率图 (err1)')
+        plot_error_histogram([err2], '误差频率图 (err2)')
+        plot_error_boxplot([np.linalg.norm(p1 - pp2[0:2]) for i in range(pos2[good == 1].shape[0])])
+        plot_homography_matrix_heatmap(M)
+        plot_ransac_scatter(np.array([p1 for i in range(pos2[good == 1].shape[0]) if mask[i] == 1]),
+                            np.array([p1 for i in range(pos2[good == 1].shape[0]) if mask[i] == 0]))
+
 
         print('Output file: ', outputfile)
         plt.savefig(outputfile, dpi=300)
@@ -369,47 +431,8 @@ def find_homography(recs, pixels, pos3ds, symbols, camera_location, im, show, ra
         print('err', err1, err1 / np.sum(mask), err2, err2 / np.sum(mask))
     return err1, err2
 
-def plot_error_histogram(errors, title='误差频率图'):
-    plt.figure(figsize=(10, 6))
-    plt.hist(errors, bins=30, alpha=0.75, color='blue', edgecolor='black')
-    plt.title(title)
-    plt.xlabel('误差大小')
-    plt.ylabel('频率')
-    plt.grid(True)
-    plt.show()
-plot_error_histogram([err1], '误差频率图 (err1)')
-plot_error_histogram([err2], '误差频率图 (err2)')
 
-def plot_error_boxplot(errors):
-    plt.figure(figsize=(10, 6))
-    plt.boxplot(errors, vert=True, patch_artist=True)
-    plt.title('误差分布箱线图')
-    plt.ylabel('误差大小')
-    plt.grid(True)
-    plt.show()
-errors = [np.linalg.norm(p1 - pp2[0:2]) for i in range(pos2[good == 1].shape[0])]
-plot_error_boxplot(errors)
 
-def plot_homography_matrix_heatmap(H):
-    plt.figure(figsize=(10, 6))
-    sns.heatmap(H, annot=True, cmap='coolwarm', vmin=-1, vmax=1)
-    plt.title('单应性矩阵热图')
-    plt.show()
-plot_homography_matrix_heatmap(M)
-
-def plot_ransac_scatter(inliers, outliers):
-    plt.figure(figsize=(10, 6))
-    plt.scatter(inliers[:, 0], inliers[:, 1], c='green', marker='o', label='内点')
-    plt.scatter(outliers[:, 0], outliers[:, 1], c='red', marker='x', label='外点')
-    plt.title('RANSAC算法散点图')
-    plt.xlabel('X 坐标')
-    plt.ylabel('Y 坐标')
-    plt.legend()
-    plt.grid(True)
-    plt.show()
-inliers = np.array([p1 for i in range(pos2[good == 1].shape[0]) if mask[i] == 1])
-outliers = np.array([p1 for i in range(pos2[good == 1].shape[0]) if mask[i] == 0])
-plot_ransac_scatter(inliers, outliers)
 
 # **********
 # read data from the features file
@@ -421,7 +444,6 @@ def read_points_data(filename, pixel_x, pixel_y, scale):
         recs = []
         for row in csv_reader:
             if line_count == 0:
-                print(f'Column names are {", ".join(row)}')
                 line_count += 1
                 names = row
                 indx = names.index(pixel_x)
@@ -458,7 +480,6 @@ def read_camera_locations():
         recs = []
         for row in csv_reader:
             if line_count == 0:
-                print(f'Column names are {", ".join(row)}')
                 line_count += 1
                 names = row
             else:
