@@ -438,16 +438,26 @@ def find_homography(recs, pixels, pos3ds, symbols, camera_location, im, show, ra
         print('err', err1, err1 / np.sum(mask), err2, err2 / np.sum(mask))
     return M, err1, err2
 
-
-# 读取DEM数据
+# 加载DEM数据
 def load_dem_data(dem_file):
     dataset = gdal.Open(dem_file)
+
+    if dataset is None:
+        raise RuntimeError(f"无法加载 DEM 文件: {dem_file}")
+
     dem_data = dataset.ReadAsArray()
     gt = dataset.GetGeoTransform()
-    dem_x = np.arange(dem_data.shape[1]) * gt[1] + gt[0]
-    dem_y = np.arange(dem_data.shape[0]) * gt[5] + gt[3]
-    dem_interpolator = RegularGridInterpolator((dem_y, dem_x), dem_data)
-    return dem_interpolator
+
+    print(f"【DEBUG】DEM 形状: {dem_data.shape}")
+    print(f"【DEBUG】DEM 仿射变换参数: {gt}")
+
+    # 计算 DEM 坐标范围
+    dem_x = np.arange(dem_data.shape[1]) * gt[1] + gt[0]  # 经度范围
+    dem_y = np.arange(dem_data.shape[0]) * gt[5] + gt[3]  # 纬度范围
+
+    dem_interpolator = RegularGridInterpolator((dem_y, dem_x), dem_data)  # 插值器
+
+    return dem_interpolator, dem_x, dem_y  # ✅ 返回 dem_x, dem_y
 
 
 # 分解单应性矩阵，得到内参矩阵和外参矩阵
@@ -457,19 +467,37 @@ def decompose_homography(M):
     if M.shape != (3, 3):
         raise ValueError("Input matrix M must be a 3x3 matrix")
 
-    K, R, t, _ = cv2.decomposeHomographyMat(M, np.eye(3))
-    return K, R[0], t[0]
+    solutions = cv2.decomposeHomographyMat(M, np.eye(3))
 
+    if solutions is None or len(solutions) < 3:
+        raise RuntimeError("Homography decomposition failed, no valid solution found.")
+
+    # 选择第一个解
+    K = np.array(solutions[0], dtype=np.float64)
+    R = solutions[1][0]  # 旋转矩阵，选择第一个解
+    t = solutions[2][0]  # 平移向量，选择第一个解
+
+    logging.debug(f'Chosen K: {K}')
+    return K, R, t
 
 # 使用PnP算法进行相机姿态估计
 def estimate_camera_pose(pos3d, pixels, K):
-    pos3d = np.array(pos3d).reshape(-1, 3)
-    pixels = np.array(pixels).reshape(-1, 2)
-    success, rotation_vector, translation_vector = cv2.solvePnP(pos3d, pixels, K, np.zeros(4))
-    if not success:
-        raise RuntimeError("PnP算法计算失败")
-    return rotation_vector, translation_vector
+    pos3d = np.asarray(pos3d, dtype=np.float64).reshape(-1, 3)  # 确保是 float64
+    pixels = np.asarray(pixels, dtype=np.float64).reshape(-1, 2)
+    K = np.asarray(K, dtype=np.float64).reshape(3, 3)
+    dist_coeffs = np.zeros((4, 1), dtype=np.float64)  # 这里改为 (4,1) float64
 
+    # 检查是否存在 NaN 或 Inf
+    if np.isnan(pos3d).any() or np.isnan(pixels).any():
+        raise ValueError("pos3d 或 pixels 含有 NaN 值")
+    if np.isinf(pos3d).any() or np.isinf(pixels).any():
+        raise ValueError("pos3d 或 pixels 含有 Inf 值")
+
+    # 运行 solvePnP
+    success, rotation_vector, translation_vector = cv2.solvePnP(pos3d, pixels, K, dist_coeffs)
+    if not success:
+        raise RuntimeError("PnP 计算失败，请检查输入数据。")
+    return rotation_vector, translation_vector
 
 # 将像素坐标转换为射线
 def pixel_to_ray(pixel_coord, K, rotation_vector, translation_vector):
@@ -483,27 +511,61 @@ def pixel_to_ray(pixel_coord, K, rotation_vector, translation_vector):
 
     ray_origin = T.ravel()
     ray_direction = np.dot(R.T, normalized_coord).ravel()
+
+    print(f"【DEBUG】射线原点（UTM 或投影坐标）: {ray_origin}")
+
+    # **转换 ray_origin 从 UTM 到 WGS84 经纬度**
+    transformer = Transformer.from_crs("epsg:32633", "epsg:4326", always_xy=True)  # 这里 32633 是 UTM Zone 33N，请确认你的 UTM 坐标系
+    lon, lat = transformer.transform(ray_origin[0], ray_origin[1])  # 仅转换 X 和 Y
+
+    ray_origin = np.array([lon, lat, ray_origin[2]])  # 替换成经纬度坐标
+    print(f"【DEBUG】转换后的射线原点（WGS84）: {ray_origin}")
+
     return ray_origin, ray_direction
 
-
 # 计算射线与DEM的交点
-def ray_intersect_dem(ray_origin, ray_direction, dem_interpolator):
+def ray_intersect_dem(ray_origin, ray_direction, dem_interpolator, dem_x, dem_y):
+    print(f"【DEBUG】射线起点: {ray_origin}")
+    print(f"【DEBUG】射线方向: {ray_direction}")
+
     t_values = np.linspace(0, 10000, 1000)
     intersection = None
+
     for t in t_values:
         point = ray_origin + t * ray_direction
-        dem_height = dem_interpolator([point[1], point[0]])[0]  # 注意坐标顺序
+        print(f"【DEBUG】射线步进 t={t}: point={point}")
+
+        # **转换 point 到 WGS84**
+        transformer = Transformer.from_crs("epsg:32633", "epsg:4326", always_xy=True)
+        lon, lat = transformer.transform(point[0], point[1])
+        point = np.array([lon, lat, point[2]])  # 替换坐标
+
+        print(f"【DEBUG】转换后的 point（WGS84）: {point}")
+
+        if (point[0] < dem_x.min() or point[0] > dem_x.max() or
+                point[1] < dem_y.min() or point[1] > dem_y.max()):
+            print(f"❌【错误】点超出 DEM 范围: {point}")
+            continue
+
+        dem_height = dem_interpolator([point[1], point[0]])[0]
+        print(f"【DEBUG】DEM 高度: {dem_height}")
+
         if point[2] <= dem_height:
             intersection = point
             break
+
+    if intersection is None:
+        print("❌【错误】射线未与 DEM 相交")
+
     return intersection
 
 
 # 输入像素坐标，输出地理坐标
-def pixel_to_geo(pixel_coord, K, rotation_vector, translation_vector, dem_interpolator):
+def pixel_to_geo(pixel_coord, K, rotation_vector, translation_vector, dem_interpolator, dem_x, dem_y):
     ray_origin, ray_direction = pixel_to_ray(pixel_coord, K, rotation_vector, translation_vector)
-    geo_coord = ray_intersect_dem(ray_origin, ray_direction, dem_interpolator)
+    geo_coord = ray_intersect_dem(ray_origin, ray_direction, dem_interpolator, dem_x, dem_y)  # ✅ 传入 dem_x, dem_y
     return geo_coord
+
 
 # **********
 # read data from the features file
@@ -592,6 +654,7 @@ def do_it(image_name, features, pixel_x, pixel_y, output, scale, dem_file):
         if pixel[0] != 0 or pixel[1] != 0:
             plt.text(pixel[0], pixel[1], symbol, color='red', fontsize=6)
         pixels.append(pixel)
+    pixels = np.array(pixels)
 
     num_matches12 = find_homographies(recs, locations, im, False, 75.0, output)
     num_matches2 = num_matches12[:, 1]
@@ -615,24 +678,53 @@ def do_it(image_name, features, pixel_x, pixel_y, output, scale, dem_file):
 
     # 分解单应性矩阵
     K, R, t = decompose_homography(best_homography_matrix)
+    if K.shape != (3, 3):
+        logging.warning("Invalid K matrix shape, using default camera matrix.")
+        K = np.array([[1000, 0, 960], [0, 1000, 540], [0, 0, 1]], dtype=np.float64)
+
     rotation_vector, translation_vector = estimate_camera_pose(np.array([rec['pos3d'] for rec in recs]), pixels, K)
 
     # 读取DEM数据
-    dem_interpolator = load_dem_data(dem_file)
+    dem_interpolator, dem_x, dem_y = load_dem_data(dem_file)
 
-    # 交互式输入像素坐标
+    # 交互式输入像素坐标，输出地理坐标
     while True:
         try:
-            input_pixel_x = input("Enter pixel X coordinate (or type 'exit' to quit): ")
-            if input_pixel_x.lower() == 'exit':
+            input_pixel_x, input_pixel_y = None, None  # 确保变量已初始化
+            input_pixel = input("请输入像素坐标 (x, y) 或输入 'exit' 退出: ").strip()
+
+            if input_pixel.lower() == 'exit':
                 break
-            input_pixel_x = float(input_pixel_x)
-            input_pixel_y = float(input("Enter pixel Y coordinate: "))
+
+            print(f"【DEBUG】输入原始内容: {repr(input_pixel)}")  # 调试信息，查看输入内容
+
+            # 处理中文逗号，去除空格
+            pixel_values = input_pixel.replace(" ", "").replace("，", ",").split(",")
+            print(f"【DEBUG】解析后: {pixel_values}")  # 查看解析后的数据
+
+            if len(pixel_values) != 2:
+                print("输入格式错误，请使用 (x, y) 形式，例如：755,975")
+                continue  # 避免变量未赋值时继续执行
+
+            input_pixel_x, input_pixel_y = map(float, pixel_values)
+            print(f"【DEBUG】转换为浮点数: x={input_pixel_x}, y={input_pixel_y}")  # 检查是否成功解析
+
             input_pixel = np.array([input_pixel_x, input_pixel_y])
-            geo_coord = pixel_to_geo(input_pixel, K, rotation_vector, translation_vector, dem_interpolator)
-            print(f"Geographic Coordinate: {geo_coord}")
-        except ValueError:
-            print("Invalid input. Please enter numeric values.")
+
+            # 计算地理坐标
+            geo_coord = pixel_to_geo(input_pixel, K, rotation_vector, translation_vector, dem_interpolator, dem_x, dem_y)
+
+            if geo_coord is not None:
+                print(
+                    f"像素坐标 ({input_pixel_x}, {input_pixel_y}) 对应的地理坐标: 经度 {geo_coord[0]:.6f}, 纬度 {geo_coord[1]:.6f}")
+            else:
+                print(f"无法找到 ({input_pixel_x}, {input_pixel_y}) 对应的地理坐标，请检查输入或 DEM 数据。")
+
+        except ValueError as e:
+            print(f"输入格式错误，请使用 (x, y) 形式，例如：755,975，错误详情: {e}")
+        except Exception as e:
+            print(f"发生未知错误: {e}")
+
 
 img = '1898'
 # img = '1900-1910'
