@@ -10,6 +10,10 @@ import math
 import logging
 import pyproj
 from pyproj import Transformer
+from scipy.spatial import distance
+import seaborn as sns
+from scipy.interpolate import RegularGridInterpolator
+from osgeo import gdal
 
 # 设置字体
 plt.rcParams['font.sans-serif'] = ['SimHei']  # 使用黑体
@@ -29,6 +33,7 @@ def wgs84_to_utm(lat, lon):
     easting, northing = transformer.transform(lat, lon)
     return easting, northing
 
+# 可视化
 def plot_error_histogram(errors, title='误差频率图'):
     plt.figure(figsize=(10, 6))
     plt.hist(errors, bins=30, alpha=0.75, color='blue', edgecolor='black')
@@ -114,8 +119,10 @@ def plot_homography_matrix_heatmap(H):
 
 def plot_ransac_scatter(inliers, outliers):
     plt.figure(figsize=(10, 6))
-    plt.scatter(inliers[:, 0], inliers[:, 1], c='green', marker='o', label='内点')
-    plt.scatter(outliers[:, 0], outliers[:, 1], c='red', marker='x', label='外点')
+    if inliers.size > 0:
+        plt.scatter(inliers[:, 0], inliers[:, 1], c='green', marker='o', label='内点')
+    if outliers.size > 0:
+        plt.scatter(outliers[:, 0], outliers[:, 1], c='red', marker='x', label='外点')
     plt.title('RANSAC算法散点图')
     plt.xlabel('X 坐标')
     plt.ylabel('Y 坐标')
@@ -418,9 +425,9 @@ def find_homography(recs, pixels, pos3ds, symbols, camera_location, im, show, ra
         plot_error_histogram([err2], '误差频率图 (err2)')
         plot_error_boxplot([np.linalg.norm(p1 - pp2[0:2]) for i in range(pos2[good == 1].shape[0])])
         plot_homography_matrix_heatmap(M)
-        plot_ransac_scatter(np.array([p1 for i in range(pos2[good == 1].shape[0]) if mask[i] == 1]),
-                            np.array([p1 for i in range(pos2[good == 1].shape[0]) if mask[i] == 0]))
-
+        inliers = np.array([p1 for i in range(pos2[good == 1].shape[0]) if mask[i] == 1])
+        outliers = np.array([p1 for i in range(pos2[good == 1].shape[0]) if mask[i] == 0])
+        plot_ransac_scatter(inliers, outliers)
 
         print('Output file: ', outputfile)
         plt.savefig(outputfile, dpi=300)
@@ -432,7 +439,64 @@ def find_homography(recs, pixels, pos3ds, symbols, camera_location, im, show, ra
     return err1, err2
 
 
+# 读取DEM数据
+def load_dem_data(dem_file):
+    dataset = gdal.Open(dem_file)
+    dem_data = dataset.ReadAsArray()
+    gt = dataset.GetGeoTransform()
+    dem_x = np.arange(dem_data.shape[1]) * gt[1] + gt[0]
+    dem_y = np.arange(dem_data.shape[0]) * gt[5] + gt[3]
+    dem_interpolator = RegularGridInterpolator((dem_y, dem_x), dem_data)
+    return dem_interpolator
 
+
+# 分解单应性矩阵，得到内参矩阵和外参矩阵
+def decompose_homography(H):
+    K, R, t, _ = cv2.decomposeHomographyMat(H, np.eye(3))
+    return K, R[0], t[0]
+
+
+# 使用PnP算法进行相机姿态估计
+def estimate_camera_pose(world_coords, pixels, K):
+    success, rotation_vector, translation_vector = cv2.solvePnP(world_coords, pixels, K, np.zeros(4))
+    if not success:
+        raise RuntimeError("PnP算法计算失败")
+    return rotation_vector, translation_vector
+
+
+# 将像素坐标转换为射线
+def pixel_to_ray(pixel_coord, K, rotation_vector, translation_vector):
+    pixel_coord_homogeneous = np.append(pixel_coord, 1).reshape(-1, 1)
+    inv_K = np.linalg.inv(K)
+    normalized_coord = np.dot(inv_K, pixel_coord_homogeneous)
+    normalized_coord = normalized_coord / np.linalg.norm(normalized_coord)
+
+    R, _ = cv2.Rodrigues(rotation_vector)
+    T = translation_vector.reshape(-1, 1)
+
+    ray_origin = T.ravel()
+    ray_direction = np.dot(R.T, normalized_coord).ravel()
+    return ray_origin, ray_direction
+
+
+# 计算射线与DEM的交点
+def ray_intersect_dem(ray_origin, ray_direction, dem_interpolator):
+    t_values = np.linspace(0, 10000, 1000)
+    intersection = None
+    for t in t_values:
+        point = ray_origin + t * ray_direction
+        dem_height = dem_interpolator([point[1], point[0]])[0]  # 注意坐标顺序
+        if point[2] <= dem_height:
+            intersection = point
+            break
+    return intersection
+
+
+# 输入像素坐标，输出地理坐标
+def pixel_to_geo(pixel_coord, K, rotation_vector, translation_vector, dem_interpolator):
+    ray_origin, ray_direction = pixel_to_ray(pixel_coord, K, rotation_vector, translation_vector)
+    geo_coord = ray_intersect_dem(ray_origin, ray_direction, dem_interpolator)
+    return geo_coord
 
 # **********
 # read data from the features file
@@ -502,7 +566,7 @@ def read_camera_locations():
 # **********
 # Main function
 # **********
-def do_it(image_name, features, pixel_x, pixel_y, output, scale):
+def do_it(image_name, features, pixel_x, pixel_y, output, scale, dem_file):
     im = cv2.imread(image_name)
     im2 = np.copy(im)
     im[:, :, 0] = im2[:, :, 2]
@@ -531,9 +595,35 @@ def do_it(image_name, features, pixel_x, pixel_y, output, scale):
     print(np.min(num_matches2))
 
     theloci = np.argmin(num_matches2)  # theloci contains the best location for the camera
+    best_location = locations[theloci]['pos3d']
     print('location id: ' + str(theloci) + ' - ' + str(locations[theloci]))
 
     find_homographies(recs, [locations[theloci]], im, True, 75.0, output)  # Orig = 120.0
+
+    # 使用现有代码计算的单应性矩阵
+    best_homography_matrix = find_homography(recs, pixels, np.array([rec['pos3d'] for rec in recs]),
+                                             np.array([rec['symbol'] for rec in recs]), best_location, im, False, 75.0, output)
+
+    # 分解单应性矩阵
+    K, R, t = decompose_homography(best_homography_matrix)
+    rotation_vector, translation_vector = estimate_camera_pose(np.array([rec['pos3d'] for rec in recs]), pixels, K)
+
+    # 读取DEM数据
+    dem_interpolator = load_dem_data(dem_file)
+
+    # 交互式输入像素坐标
+    while True:
+        try:
+            input_pixel_x = input("Enter pixel X coordinate (or type 'exit' to quit): ")
+            if input_pixel_x.lower() == 'exit':
+                break
+            input_pixel_x = float(input_pixel_x)
+            input_pixel_y = float(input("Enter pixel Y coordinate: "))
+            input_pixel = np.array([input_pixel_x, input_pixel_y])
+            geo_coord = pixel_to_geo(input_pixel, K, rotation_vector, translation_vector, dem_interpolator)
+            print(f"Geographic Coordinate: {geo_coord}")
+        except ValueError:
+            print("Invalid input. Please enter numeric values.")
 
 img = '1898'
 # img = '1900-1910'
@@ -573,6 +663,7 @@ if img == '1898':
         pixel_y = 'Pixel_y_1898.jpg'
         output = 'zOutput_1898.png'
         scale = 1.0
+        dem_file = 'dem_data.tif'
 
 
 elif img == '1900-1910':
@@ -741,7 +832,7 @@ elif img == 'Worley Family-20':
 else:
     print('No file was selected')
 
-do_it(image_name, features, pixel_x, pixel_y, output, scale)
+do_it(image_name, features, pixel_x, pixel_y, output, scale, dem_file)
 
 print('**********************')
 # print ('ret: ')
