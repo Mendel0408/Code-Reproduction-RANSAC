@@ -294,7 +294,7 @@ def find_homographies(recs, camera_locations, im, show, ransacbound, outputfile)
         if grids[i] >= grid_code_min:
             if show:
                 print(i, grids[i], loc3ds[i])
-            num_matches[i, 0], num_matches[i, 1] = find_homography(recs, pixels, pos3ds, symbols, loc3ds[i], im, show,
+            M, num_matches[i, 0], num_matches[i, 1] = find_homography(recs, pixels, pos3ds, symbols, loc3ds[i], im, show,
                                                                    ransacbound, outputfile)
         else:
             num_matches[i, :] = 0
@@ -318,15 +318,16 @@ def find_homographies(recs, camera_locations, im, show, ransacbound, outputfile)
 # Find homography function
 # **********
 def find_homography(recs, pixels, pos3ds, symbols, camera_location, im, show, ransacbound, outputfile):
-    pos2 = np.zeros((pixels.shape[0], 2))
-    good = np.zeros(pixels.shape[0])
-    for i in range(pixels.shape[0]):
-        good[i] = pixels[i, 0] != 0 or pixels[i, 1] != 0
+    pixels = np.array(pixels)
+    pos2 = np.zeros((len(pixels), 2))
+    good = np.zeros(len(pixels))
+    for i in range(len(pixels)):
+        good[i] = pixels[i][0] != 0 or pixels[i][1] != 0
         p = pos3ds[i, :] - camera_location
         p = np.array([p[2], p[1], p[0]])
         p = p / p[2]
         pos2[i, :] = p[0:2]
-    M, mask = cv2.findHomography(pos2[good == 1], pixels[good == 1], cv2.RANSAC, ransacbound)
+    M, mask = cv2.findHomography(pos2[good == 1], np.array(pixels)[good == 1], cv2.RANSAC, ransacbound)
     M = np.linalg.inv(M)
     logging.debug(f'Homography Matrix M: {M}')
     logging.debug(f'Mask: {mask}')
@@ -340,14 +341,13 @@ def find_homography(recs, pixels, pos3ds, symbols, camera_location, im, show, ra
             pixel = rec['pixel']
             if pixel[0] != 0 or pixel[1] != 0:
                 plt.text(pixel[0], pixel[1], symbol, color='purple', fontsize=6, weight='bold')
-                # plt.text(pixel[0],pixel[1],symbol, style='italic',fontsize=30, weight ='bold', bbox=dict(boxstyle="round", ec=(1., 0.5, 0.5), fc=(1., 0.8, 0.8),))
     err1 = 0
     err2 = 0
     feature = ['id', 'symbol', 'name', 'x', 'y', 'pixel_x', 'pixel_y', 'calc_pixel_x', 'calc_pixel_y']
     features = []
     features.append(feature)
     for i in range(pos2[good == 1].shape[0]):
-        p1 = pixels[good == 1][i, :]
+        p1 = np.array(pixels)[good == 1][i, :]
         pp = np.array([pos2[good == 1][i, 0], pos2[good == 1][i, 1], 1.0])
         pp2 = np.matmul(np.linalg.inv(M), pp)
         pp2 = pp2 / pp2[2]
@@ -436,7 +436,7 @@ def find_homography(recs, pixels, pos3ds, symbols, camera_location, im, show, ra
     err2 += np.sum(1 - mask) * ransacbound
     if show:
         print('err', err1, err1 / np.sum(mask), err2, err2 / np.sum(mask))
-    return err1, err2
+    return M, err1, err2
 
 
 # 读取DEM数据
@@ -451,14 +451,21 @@ def load_dem_data(dem_file):
 
 
 # 分解单应性矩阵，得到内参矩阵和外参矩阵
-def decompose_homography(H):
-    K, R, t, _ = cv2.decomposeHomographyMat(H, np.eye(3))
+def decompose_homography(M):
+    logging.debug(f'Decomposing homography matrix M: {M}')
+
+    if M.shape != (3, 3):
+        raise ValueError("Input matrix M must be a 3x3 matrix")
+
+    K, R, t, _ = cv2.decomposeHomographyMat(M, np.eye(3))
     return K, R[0], t[0]
 
 
 # 使用PnP算法进行相机姿态估计
-def estimate_camera_pose(world_coords, pixels, K):
-    success, rotation_vector, translation_vector = cv2.solvePnP(world_coords, pixels, K, np.zeros(4))
+def estimate_camera_pose(pos3d, pixels, K):
+    pos3d = np.array(pos3d).reshape(-1, 3)
+    pixels = np.array(pixels).reshape(-1, 2)
+    success, rotation_vector, translation_vector = cv2.solvePnP(pos3d, pixels, K, np.zeros(4))
     if not success:
         raise RuntimeError("PnP算法计算失败")
     return rotation_vector, translation_vector
@@ -601,8 +608,10 @@ def do_it(image_name, features, pixel_x, pixel_y, output, scale, dem_file):
     find_homographies(recs, [locations[theloci]], im, True, 75.0, output)  # Orig = 120.0
 
     # 使用现有代码计算的单应性矩阵
-    best_homography_matrix = find_homography(recs, pixels, np.array([rec['pos3d'] for rec in recs]),
-                                             np.array([rec['symbol'] for rec in recs]), best_location, im, False, 75.0, output)
+    best_homography_matrix, err1, err2 = find_homography(recs, pixels, np.array([rec['pos3d'] for rec in recs]),
+                                                         np.array([rec['symbol'] for rec in recs]), best_location, im,
+                                                         False, 75.0, output)
+    logging.debug(f'Best homography matrix: {best_homography_matrix}, err1: {err1}, err2: {err2}')
 
     # 分解单应性矩阵
     K, R, t = decompose_homography(best_homography_matrix)
