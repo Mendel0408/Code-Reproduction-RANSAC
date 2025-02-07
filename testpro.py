@@ -609,6 +609,7 @@ def read_points_data(filename, pixel_x, pixel_y, scale):
         csv_reader = csv.reader(csv_file, delimiter=',')
         line_count = 0
         recs = []
+        pixels = []
         for row in csv_reader:
             if line_count == 0:
                 line_count += 1
@@ -624,9 +625,18 @@ def read_points_data(filename, pixel_x, pixel_y, scale):
                 latitude = float(row[5])
                 elevation = float(row[6])
                 height = float(row[3]) + float(elevation)
+                # 跳过像素坐标为0,0的点
+                if pixel[0] == 0 and pixel[1] == 0:
+                    continue
+                pixels.append(pixel)
                 # 添加坐标转换
-                easting, northing = wgs84_to_utm(latitude, longitude)
-                pos3d = np.array([easting, northing, height])
+                try:
+                    logging.debug(f'Processing row {line_count}: lat={latitude}, lon={longitude}')
+                    easting, northing = wgs84_to_utm(latitude, longitude)
+                    pos3d = np.array([easting, northing, height])
+                except ValueError as e:
+                    logging.error(f'Error processing row {line_count}: {e}')
+                    continue
 
                 rec = {'symbol': symbol,
                        'pixel': pixel,
@@ -656,8 +666,13 @@ def read_camera_locations():
                 latitude = float(row[3])
                 height = float(row[4]) + 2.0  # addition of 2 meters as the observer height
                 # 添加坐标转换
-                easting, northing = wgs84_to_utm(latitude, longitude)
-                pos3d = np.array([easting, northing, height])
+                try:
+                    logging.debug(f'Processing row {line_count}: lat={latitude}, lon={longitude}')
+                    easting, northing = wgs84_to_utm(latitude, longitude)
+                    pos3d = np.array([easting, northing, height])
+                except ValueError as e:
+                    logging.error(f'Error processing row {line_count}: {e}')
+                    continue
 
                 rec = {'grid_code': grid_code,
                        'pos3d': pos3d}
@@ -670,22 +685,6 @@ def read_camera_locations():
 # Main function
 # **********
 def do_it(image_name, features, pixel_x, pixel_y, output, scale, dem_file):
-    # 读取最佳相机位置（地理坐标）
-    ray_origin = theloci  # 这里 theloci 是已筛选出的最佳相机位置（地理坐标）
-    print(f"【DEBUG】最佳相机位置（ray_origin）: {ray_origin}")
-    # 假设我们有单应性矩阵 M，来计算 ray_direction
-    ray_direction = np.dot(M, np.array([pixel_x, pixel_y, 1]))  # 假设 pixel_x 和 pixel_y 是图像中像素的坐标
-    print(f"【DEBUG】计算出的 ray_direction: {ray_direction}")
-    # 根据图像尺寸计算 K 矩阵
-    width, height = im.shape[1], im.shape[0]  # 读取图像的宽度和高度
-    cx, cy = width / 2, height / 2  # 主点位置假设为图像中心
-
-    # 焦距可以暂时使用默认值，或根据图像尺寸来调整
-    fx = fy = 1000  # 假设焦距为 1000，实际可以根据相机内参来调整
-    K = np.array([[fx, 0, cx], [0, fy, cy], [0, 0, 1]], dtype=np.float64)
-
-    print(f"【DEBUG】计算出的 K 矩阵: \n{K}")
-
     im = cv2.imread(image_name)
     im2 = np.copy(im)
     im[:, :, 0] = im2[:, :, 2]
@@ -715,6 +714,10 @@ def do_it(image_name, features, pixel_x, pixel_y, output, scale, dem_file):
     print(np.min(num_matches2))
 
     theloci = np.argmin(num_matches2)  # theloci contains the best location for the camera
+    # 读取最佳相机位置（地理坐标）
+    ray_origin = locations[theloci]['pos3d'] # 这里 theloci 是已筛选出的最佳相机位置（地理坐标）
+    print(f"【DEBUG】最佳相机位置（ray_origin）: {ray_origin}")
+
     best_location = locations[theloci]['pos3d']
     print('location id: ' + str(theloci) + ' - ' + str(locations[theloci]))
 
@@ -729,17 +732,29 @@ def do_it(image_name, features, pixel_x, pixel_y, output, scale, dem_file):
     # 分解单应性矩阵
     K, R, t = decompose_homography(best_homography_matrix)
     if K.shape != (3, 3):
-        logging.warning("Invalid K matrix shape, using default camera matrix.")
-        K = np.array([[1000, 0, 960], [0, 1000, 540], [0, 0, 1]], dtype=np.float64)
+        print(f"🚨【错误】K 计算失败，使用默认相机矩阵！")
+        # 根据图像尺寸计算 K 矩阵
+        width, height = im.shape[1], im.shape[0]  # 读取图像的宽度和高度
+        cx, cy = width / 2, height / 2  # 主点位置假设为图像中心
 
+        # 焦距可以暂时使用默认值，或根据图像尺寸来调整
+        fx = fy = 1000  # 假设焦距为 1000，实际可以根据相机内参来调整
+        K = np.array([[fx, 0, cx], [0, fy, cy], [0, 0, 1]], dtype=np.float64)
+
+        print(f"【DEBUG】计算出的 K 矩阵: \n{K}")
     logging.debug(f'Chosen K: {K}')
     print(f"【DEBUG】K 形状: {K.shape}, dtype: {K.dtype}")
-    print(f"【DEBUG】K 矩阵: \n{K}")
-    print(f"【DEBUG】K 计算来源，确保不是 4.0: \n{K}")
 
-    if K.shape != (3, 3):
-        print(f"🚨【错误】K 计算失败，使用默认相机矩阵！")
-        K = np.array([[1000, 0, 960], [0, 1000, 540], [0, 0, 1]], dtype=np.float64)
+    M = best_homography_matrix
+
+    # 使用第一个非零像素坐标
+    pixel_x, pixel_y = pixels[0]
+
+    # 打印 pixel_x 和 pixel_y 的类型
+    print(f"【DEBUG】pixel_x 类型: {type(pixel_x)}, pixel_y 类型: {type(pixel_y)}")
+
+    ray_direction = np.dot(M, np.array([pixel_x, pixel_y, 1]))  # 假设 pixel_x 和 pixel_y 是图像中像素的坐标
+    print(f"【DEBUG】计算出的 ray_direction: {ray_direction}")
 
     # ✅ 添加测试代码，检查 `pos3d` 和 `pixels`
     # ✅ 先提取 `pos3d` 和 `pixels`
