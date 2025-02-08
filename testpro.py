@@ -549,15 +549,26 @@ def pixel_to_ray(pixel_coord, K, rotation_vector, translation_vector, ray_origin
     ray_origin = np.array([lat, lon, ray_origin[2]])  # ✅ 确保格式是 (纬度, 经度, 高度)
     print(f"【DEBUG】修正后的 ray_origin (纬度, 经度, 高度): {ray_origin}")
 
+    # 先将射线方向向量转换到 WGS84 坐标系
+    utm_to_wgs_transformer = Transformer.from_crs("epsg:32650", "epsg:4326", always_xy=True)
+    # 计算射线方向在 WGS84 坐标系下的变化
+    dx, dy = ray_direction[0], ray_direction[1]
+    lat_shift, lon_shift = utm_to_wgs_transformer.transform(ray_origin[0] + dx, ray_origin[1] + dy)
+    # 计算转换后的方向向量
+    ray_direction_wgs = np.array([lat_shift - ray_origin[0], lon_shift - ray_origin[1], ray_direction[2]])
+    # 归一化射线方向
+    ray_direction_wgs = ray_direction_wgs / np.linalg.norm(ray_direction_wgs)
+    print(f"【DEBUG】修正后的 ray_direction (WGS84): {ray_direction_wgs}")
+
     return ray_origin, ray_direction
 
 # 计算射线与DEM的交点
 def ray_intersect_dem(ray_origin, ray_direction, dem_interpolator, dem_x, dem_y):
-    print(f"【DEBUG】射线起点: {ray_origin}")
-    print(f"【DEBUG】射线方向: {ray_direction}")
+    print(f"【DEBUG】最终用于 DEM 计算的 ray_origin (WGS84): {ray_origin}")
+    print(f"【DEBUG】最终用于 DEM 计算的 ray_direction (WGS84): {ray_direction_wgs}")
 
     t_values = np.linspace(0, 10000, 1000)
-    intersection = None
+    intersection = ray_intersect_dem(ray_origin, ray_direction_wgs, dem_data)
 
     for t in t_values:
         point = ray_origin + t * ray_direction
@@ -740,8 +751,21 @@ def do_it(image_name, features, pixel_x, pixel_y, output, scale, dem_file):
     # 打印 pixel_x 和 pixel_y 的类型
     print(f"【DEBUG】pixel_x 类型: {type(pixel_x)}, pixel_y 类型: {type(pixel_y)}")
 
-    ray_direction = np.dot(M, np.array([pixel_x, pixel_y, 1]))  # 假设 pixel_x 和 pixel_y 是图像中像素的坐标
-    print(f"【DEBUG】计算出的 ray_direction: {ray_direction}")
+    # 计算 `ray_direction`，使用相机旋转矩阵 `R`
+    ray_direction = np.dot(R, np.linalg.inv(K) @ np.array([pixel_x, pixel_y, 1]))  # ✅ 先归一化像素坐标，再转换
+    ray_direction = ray_direction / np.linalg.norm(ray_direction)  # 归一化射线方向
+
+    print(f"【DEBUG】修正后的 ray_direction (UTM): {ray_direction}")
+    # 先转换 `ray_direction` 到 WGS84
+    utm_to_wgs_transformer = Transformer.from_crs("epsg:32650", "epsg:4326", always_xy=True)
+    dx, dy = ray_direction[0], ray_direction[1]
+    lat_shift, lon_shift = utm_to_wgs_transformer.transform(ray_origin[0] + dx, ray_origin[1] + dy)
+
+    # 计算转换后的方向向量
+    ray_direction_wgs = np.array([lat_shift - ray_origin[0], lon_shift - ray_origin[1], ray_direction[2]])
+    ray_direction_wgs = ray_direction_wgs / np.linalg.norm(ray_direction_wgs)  # 归一化
+
+    print(f"【DEBUG】修正后的 ray_direction (WGS84): {ray_direction_wgs}")
 
     # ✅ 添加测试代码，检查 `pos3d` 和 `pixels`
     # ✅ 先提取 `pos3d` 和 `pixels`
