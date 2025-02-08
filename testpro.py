@@ -521,7 +521,7 @@ def check_translation_vector(translation_vector):
     return translation_vector
 
 # 将像素坐标转换为射线
-def pixel_to_ray(pixel_coord, K, rotation_vector, translation_vector):
+def pixel_to_ray(pixel_coord, K, rotation_vector, translation_vector, ray_origin):
     pixel_coord_homogeneous = np.append(pixel_coord, 1).reshape(-1, 1)
     inv_K = np.linalg.inv(K)
     normalized_coord = np.dot(inv_K, pixel_coord_homogeneous)
@@ -536,7 +536,6 @@ def pixel_to_ray(pixel_coord, K, rotation_vector, translation_vector):
         logging.warning(f"Translation vector is too large: {T}")
         T = np.clip(T, -1e6, 1e6)  # 限制 translation_vector 的值
 
-    ray_origin = theloci
     print(f"【DEBUG】最佳相机位置（ray_origin）: {ray_origin}")
 
     ray_direction = np.dot(M, np.array([pixel_x, pixel_y, 1]))
@@ -595,8 +594,8 @@ def ray_intersect_dem(ray_origin, ray_direction, dem_interpolator, dem_x, dem_y)
 
 
 # 输入像素坐标，输出地理坐标
-def pixel_to_geo(pixel_coord, K, rotation_vector, translation_vector, dem_interpolator, dem_x, dem_y):
-    ray_origin, ray_direction = pixel_to_ray(pixel_coord, K, rotation_vector, translation_vector)
+def pixel_to_geo(pixel_coord, K, rotation_vector, translation_vector, ray_origin, dem_interpolator, dem_x, dem_y):
+    ray_origin, ray_direction = pixel_to_ray(pixel_coord, K, rotation_vector, translation_vector, ray_origin)
     geo_coord = ray_intersect_dem(ray_origin, ray_direction, dem_interpolator, dem_x, dem_y)  # ✅ 传入 dem_x, dem_y
     return geo_coord
 
@@ -838,7 +837,7 @@ def do_it(image_name, features, pixel_x, pixel_y, output, scale, dem_file):
             input_pixel = np.array([input_pixel_x, input_pixel_y])
 
             # 计算地理坐标
-            geo_coord = pixel_to_geo(input_pixel, K, rotation_vector, translation_vector, dem_interpolator, dem_x, dem_y)
+            geo_coord = pixel_to_geo(input_pixel, K, rotation_vector, translation_vector, ray_origin, dem_interpolator, dem_x, dem_y)
 
             if geo_coord is not None:
                 print(
