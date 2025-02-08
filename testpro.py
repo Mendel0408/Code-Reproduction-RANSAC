@@ -464,6 +464,8 @@ def load_dem_data(dem_file):
     dem_x = np.arange(dem_data.shape[1]) * gt[1] + gt[0]  # 经度范围
     dem_y = np.arange(dem_data.shape[0]) * gt[5] + gt[3]  # 纬度范围
 
+    print(f"【DEBUG】DEM 范围: 经度 [{dem_x.min()}, {dem_x.max()}], 纬度 [{dem_y.min()}, {dem_y.max()}]")
+
     dem_interpolator = RegularGridInterpolator((dem_y, dem_x), dem_data)  # 插值器
 
     return dem_interpolator, dem_x, dem_y  # ✅ 返回 dem_x, dem_y
@@ -506,10 +508,6 @@ def estimate_camera_pose(pos3d, pixels, K):
     if not success:
         raise RuntimeError("PnP 计算失败，请检查输入数据。")
 
-    # 检查 translation_vector 是否合理
-    if np.linalg.norm(translation_vector) > 10000:  # 根据实际情况调整阈值
-        logging.warning(f"Translation vector is too large: {translation_vector}")
-
     return rotation_vector, translation_vector
 
 # 检查并调整translation_vector的值
@@ -538,21 +536,18 @@ def pixel_to_ray(pixel_coord, K, rotation_vector, translation_vector, ray_origin
 
     print(f"【DEBUG】最佳相机位置（ray_origin）: {ray_origin}")
 
-    ray_direction = np.dot(M, np.array([pixel_x, pixel_y, 1]))
-    print(f"【DEBUG】计算出的 ray_direction: {ray_direction}")
+    ray_direction = np.dot(R, normalized_coord).ravel()
+    ray_direction = ray_direction / np.linalg.norm(ray_direction)
+    print(f"【DEBUG】修正后的 ray_direction: {ray_direction}")
 
     print(f"【DEBUG】射线原点（UTM 或投影坐标）: {ray_origin}")
     print(f"【DEBUG】射线方向: {ray_direction}")
 
     # 转换 ray_origin 从 UTM 到 WGS84 经纬度
     transformer = Transformer.from_crs("epsg:32650", "epsg:4326")
-    lon, lat = transformer.transform(ray_origin[0], ray_origin[1])  # 仅转换 X 和 Y
-
-    ray_origin = np.array([lon, lat, ray_origin[2]])
-    if np.isinf(ray_origin).any():
-        logging.error(f'Invalid WGS84 coordinates: ray_origin={ray_origin}')
-        raise ValueError('Invalid WGS84 coordinates')
-    print(f"【DEBUG】转换后的射线原点（WGS84）: {ray_origin}")
+    lat, lon = transformer.transform(ray_origin[0], ray_origin[1])
+    ray_origin = np.array([lat, lon, ray_origin[2]])  # ✅ 确保格式是 (纬度, 经度, 高度)
+    print(f"【DEBUG】修正后的 ray_origin (纬度, 经度, 高度): {ray_origin}")
 
     return ray_origin, ray_direction
 
@@ -568,13 +563,7 @@ def ray_intersect_dem(ray_origin, ray_direction, dem_interpolator, dem_x, dem_y)
         point = ray_origin + t * ray_direction
         print(f"【DEBUG】射线步进 t={t}: point={point}")
 
-        # **转换 point 到 WGS84**
-        transformer = Transformer.from_crs("epsg:32650", "epsg:4326")
-        lon, lat = transformer.transform(point[0], point[1])
-        point = np.array([lon, lat, point[2]])  # 替换坐标
-
-        print(f"【DEBUG】转换后的 point（WGS84）: {point}")
-
+        # **point 一开始就是 WGS84 坐标系，因此不需要转换**
         if (point[0] < dem_x.min() or point[0] > dem_x.max() or
                 point[1] < dem_y.min() or point[1] > dem_y.max()):
             print(f"❌【错误】点超出 DEM 范围: {point}")
@@ -598,7 +587,6 @@ def pixel_to_geo(pixel_coord, K, rotation_vector, translation_vector, ray_origin
     ray_origin, ray_direction = pixel_to_ray(pixel_coord, K, rotation_vector, translation_vector, ray_origin)
     geo_coord = ray_intersect_dem(ray_origin, ray_direction, dem_interpolator, dem_x, dem_y)  # ✅ 传入 dem_x, dem_y
     return geo_coord
-
 
 # **********
 # read data from the features file
@@ -714,7 +702,7 @@ def do_it(image_name, features, pixel_x, pixel_y, output, scale, dem_file):
 
     theloci = np.argmin(num_matches2)  # theloci contains the best location for the camera
     # 读取最佳相机位置（地理坐标）
-    ray_origin = locations[theloci]['pos3d'] # 这里 theloci 是已筛选出的最佳相机位置（地理坐标）
+    ray_origin = locations[theloci]['pos3d']  # 这里 theloci 是已筛选出的最佳相机位置（地理坐标）
     print(f"【DEBUG】最佳相机位置（ray_origin）: {ray_origin}")
 
     best_location = locations[theloci]['pos3d']
@@ -837,7 +825,8 @@ def do_it(image_name, features, pixel_x, pixel_y, output, scale, dem_file):
             input_pixel = np.array([input_pixel_x, input_pixel_y])
 
             # 计算地理坐标
-            geo_coord = pixel_to_geo(input_pixel, K, rotation_vector, translation_vector, ray_origin, dem_interpolator, dem_x, dem_y)
+            geo_coord = pixel_to_geo(input_pixel, K, rotation_vector, translation_vector, ray_origin, dem_interpolator,
+                                     dem_x, dem_y)
 
             if geo_coord is not None:
                 print(
