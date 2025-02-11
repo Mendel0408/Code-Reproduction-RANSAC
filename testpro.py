@@ -26,33 +26,31 @@ print("Available fonts:", font_path)
 # 设置日志记录
 logging.basicConfig(level=logging.DEBUG, filename='debug.log', filemode='w', format='%(asctime)s - %(levelname)s - %(message)s')
 
-# 创建一个 Transformer 对象，用于将 WGS84 坐标转换为 UTM 坐标
-transformer_to_utm = Transformer.from_crs("epsg:4326", "epsg:32650")
-transformer_to_wgs84 = Transformer.from_crs("epsg:32650", "epsg:4326")
+# 坐标系统统一化
+class GeoCoordTransformer:
+    def __init__(self):
+        self.to_utm = Transformer.from_crs("epsg:4326", "epsg:32650", always_xy=True)
+        self.to_wgs84 = Transformer.from_crs("epsg:32650", "epsg:4326", always_xy=True)
 
-def wgs84_to_utm(lat, lon):
-    try:
-        logging.debug(f'Converting WGS84 to UTM: lat={lat}, lon={lon}')
-        easting, northing = transformer_to_utm.transform(lat, lon)
-        if np.isinf(easting) or np.isinf(northing):
-            logging.error(f'Invalid UTM coordinates: easting={easting}, northing={northing}')
-            raise ValueError('Invalid UTM coordinates')
-        return easting, northing
-    except Exception as e:
-        logging.error(f'Error converting WGS84 to UTM: {e}')
-        raise
+    def wgs84_to_utm(self, lon, lat):  # 注意顺序：先经度，后纬度
+        try:
+            easting, northing = self.to_utm.transform(lon, lat)
+            if np.isinf(easting) or np.isinf(northing):
+                raise ValueError('Invalid UTM coordinates')
+            return easting, northing
+        except Exception as e:
+            raise
 
-def utm_to_wgs84(easting, northing):
-    try:
-        logging.debug(f'Converting UTM to WGS84: easting={easting}, northing={northing}')
-        lat, lon = transformer_to_wgs84.transform(easting, northing)
-        if np.isinf(lat) or np.isinf(lon):
-            logging.error(f'Invalid WGS84 coordinates: lat={lat}, lon={lon}')
-            raise ValueError('Invalid WGS84 coordinates')
-        return lat, lon
-    except Exception as e:
-        logging.error(f'Error converting UTM to WGS84: {e}')
-        raise
+    def utm_to_wgs84(self, easting, northing):
+        try:
+            lon, lat = self.to_wgs84.transform(easting, northing)  # 注意顺序：先经度，后纬度
+            if np.isinf(lat) or np.isinf(lon):
+                raise ValueError('Invalid WGS84 coordinates')
+            return lon, lat
+        except Exception as e:
+            raise
+
+geo_transformer = GeoCoordTransformer()
 
 
 # 可视化
@@ -464,27 +462,23 @@ def find_homography(recs, pixels, pos3ds, symbols, camera_location, im, show, ra
 # 加载DEM数据
 def load_dem_data(dem_file):
     dem_dataset = gdal.Open(dem_file)
-
     if dem_dataset is None:
         raise RuntimeError(f"无法加载 DEM 文件: {dem_file}")
 
     dem_array = dem_dataset.ReadAsArray()
     gt = dem_dataset.GetGeoTransform()
-
-    # 计算 DEM 坐标范围
     dem_x = np.arange(dem_array.shape[1]) * gt[1] + gt[0]
     dem_y = np.arange(dem_array.shape[0]) * gt[5] + gt[3]
 
-    print(f"【DEBUG】DEM 范围: 经度 [{dem_x.min()}, {dem_x.max()}], 纬度 [{dem_y.min()}, {dem_y.max()}]")
-
-    dem_interpolator = RegularGridInterpolator((dem_y, dem_x), dem_array) # 插值器
-
-    return {
+    dem_interpolator = RegularGridInterpolator((dem_y, dem_x), dem_array)
+    dem_data = {
         'interpolator': dem_interpolator,
         'x_range': (dem_x.min(), dem_x.max()),
         'y_range': (dem_y.min(), dem_y.max()),
         'data': dem_array
     }
+    logging.debug(f'DEM 范围: 经度 {dem_data["x_range"]}, 纬度 {dem_data["y_range"]}')
+    return dem_data
 
 # 分解单应性矩阵，得到内参矩阵和外参矩阵
 def decompose_homography(M):
@@ -507,21 +501,17 @@ def decompose_homography(M):
 
 # 使用PnP算法进行相机姿态估计
 def estimate_camera_pose(pos3d, pixels, K):
-    pos3d = np.asarray(pos3d, dtype=np.float64).reshape(-1, 3)  # 确保是 float64
+    pos3d = np.asarray(pos3d, dtype=np.float64).reshape(-1, 3)
     pixels = np.asarray(pixels, dtype=np.float64).reshape(-1, 2)
     K = np.asarray(K, dtype=np.float64).reshape(3, 3)
-    dist_coeffs = np.zeros((4, 1), dtype=np.float64)  # 这里改为 (4,1) float64
+    dist_coeffs = np.zeros((4, 1), dtype=np.float64)
 
-    # 检查是否存在 NaN 或 Inf
-    if np.isnan(pos3d).any() or np.isnan(pixels).any():
-        raise ValueError("pos3d 或 pixels 含有 NaN 值")
-    if np.isinf(pos3d).any() or np.isinf(pixels).any():
-        raise ValueError("pos3d 或 pixels 含有 Inf 值")
+    _, rotation_vector, translation_vector, inliers = cv2.solvePnPRansac(pos3d, pixels, K, dist_coeffs)
+    if inliers is None or len(inliers) < 6:
+        raise RuntimeError("PnP RANSAC failed or insufficient inliers.")
 
-    # 运行 solvePnP
-    success, rotation_vector, translation_vector = cv2.solvePnP(pos3d, pixels, K, dist_coeffs)
-    if not success:
-        raise RuntimeError("PnP 计算失败，请检查输入数据。")
+    rotation_vector, translation_vector = cv2.solvePnPRefineLM(pos3d[inliers], pixels[inliers], K, dist_coeffs,
+                                                               rotation_vector, translation_vector)
 
     return rotation_vector, translation_vector
 
@@ -534,76 +524,89 @@ def check_translation_vector(translation_vector):
     return translation_vector
 
 # 将像素坐标转换为射线
-def pixel_to_ray(pixel_x, pixel_y, K, R, ray_origin):
+def pixel_to_ray(pixel_x, pixel_y, K, R, ray_origin_utm):
     """
-    计算从相机位置到像素坐标 (pixel_x, pixel_y) 的射线方向，并转换到 WGS84 坐标系。
+    计算从相机位置到像素坐标 (pixel_x, pixel_y) 的射线方向，并转换到 WGS84 坐标系
 
     参数:
         pixel_x, pixel_y: 图像中的像素坐标
         K: 相机内参矩阵 (3x3)
         R: 相机旋转矩阵 (3x3)
-        ray_origin: 相机在世界坐标系（WGS84）中的位置 (纬度, 经度, 高度)
+        ray_origin_utm: 相机在UTM坐标系中的位置 (easting, northing, height)
 
     返回:
-        ray_origin_wgs: WGS84 下的射线起点
-        ray_direction_wgs: WGS84 下的射线方向
+        ray_origin_wgs: WGS84 下的射线起点 (lon, lat, height)
+        ray_direction_wgs: WGS84 下的射线方向单位向量 (delta_lon, delta_lat, delta_height)
     """
-    # **第一步：计算相机坐标系下的射线方向**
-    pixel_homogeneous = np.array([pixel_x, pixel_y, 1])  # 齐次像素坐标
-    camera_ray = np.linalg.inv(K) @ pixel_homogeneous  # 归一化相机坐标
-    camera_ray = camera_ray / np.linalg.norm(camera_ray)  # 归一化射线方向
+    # =================================================================
+    # 第一步：计算UTM坐标系下的射线方向
+    # =================================================================
+    # 构建齐次像素坐标 (注意OpenCV坐标系的y轴方向)
+    pixel_homogeneous = np.array([pixel_x, pixel_y, 1.0], dtype=np.float64)
+    # 归一化相机坐标 (K^-1 * [u, v, 1]^T)
+    camera_ray = np.linalg.inv(K) @ pixel_homogeneous
+    # 归一化射线方向（相机坐标系）
+    camera_ray /= np.linalg.norm(camera_ray)
+    # 转换到世界坐标系（UTM）
+    ray_direction_utm = R @ camera_ray  # 旋转后的方向向量
+    ray_direction_utm /= np.linalg.norm(ray_direction_utm)  # 单位向量
+    # 将UTM坐标转换为WGS84经纬度（注意顺序：easting->经度，northing->纬度）
+    ray_origin_lon, ray_origin_lat = utm_to_wgs_transformer.transform(
+        ray_origin_utm[0],  # easting -> 经度
+        ray_origin_utm[1]   # northing -> 纬度
+    )
+    ray_end_lon, ray_end_lat = utm_to_wgs_transformer.transform(
+        ray_end_utm[0],    # easting -> 经度
+        ray_end_utm[1]      # northing -> 纬度
+    )
 
-    # **第二步：变换到世界坐标系 (UTM)**
-    ray_direction = R @ camera_ray
-    ray_direction = ray_direction / np.linalg.norm(ray_direction)
+    # 构建WGS84起点（经度在前，纬度在后）
+    ray_origin_wgs = np.array([ray_origin_lon, ray_origin_lat, ray_origin_utm[2]])
 
-    print(f"【DEBUG】修正后的 ray_direction (UTM): {ray_direction}")
+    # 计算方向向量（经度差在前，纬度差在后）
+    delta_lon = ray_end_lon - ray_origin_lon
+    delta_lat = ray_end_lat - ray_origin_lat
+    direction_wgs = np.array([delta_lon, delta_lat, delta_height])
+    direction_wgs /= np.linalg.norm(direction_wgs)
 
-    # **第三步：将 `ray_direction` 转换到 WGS84**
-    # 方向向量的转换需要保持方向不变，而不是直接转换坐标
-    # 我们可以通过计算射线终点的 WGS84 坐标来推导方向向量
-    utm_to_wgs_transformer = Transformer.from_crs("epsg:32650", "epsg:4326", always_xy=True)
+    # 调试输出
+    print(f"【DEBUG】UTM射线起点: {ray_origin_utm}")
+    print(f"【DEBUG】WGS84射线起点: {ray_origin_wgs}")
+    print(f"【DEBUG】WGS84方向向量: {direction_wgs} (单位向量)")
 
-    # 计算射线终点的 UTM 坐标
-    ray_end_utm = ray_origin + ray_direction * 1000  # 假设射线长度为 1000 米
-    ray_end_utm_lat, ray_end_utm_lon = utm_to_wgs_transformer.transform(ray_end_utm[0], ray_end_utm[1])
-
-    # 计算射线终点的 WGS84 坐标
-    ray_end_wgs = np.array([ray_end_utm_lat, ray_end_utm_lon, ray_end_utm[2]])
-
-    # 计算 WGS84 下的方向向量
-    ray_direction_wgs = ray_end_wgs - ray_origin
-    ray_direction_wgs = ray_direction_wgs / np.linalg.norm(ray_direction_wgs)
-
-    print(f"【DEBUG】最终用于 DEM 计算的 ray_direction (WGS84): {ray_direction_wgs}")
-
-    return ray_origin, ray_direction_wgs
+    return ray_origin_wgs, direction_wgs
 
 
 # 计算射线与DEM的交点
-def ray_intersect_dem(ray_origin, ray_direction, dem_data, max_search_dist=5000, init_step=10.0):
-    current_pos = np.array(ray_origin, dtype=np.float64)
-    step = init_step  # 初始步长10米
-    min_elevation = dem_data['data'].min() - 100  # DEM最低高程减100米作为安全边界
+def ray_intersect_dem(ray_origin, ray_direction, dem_data, max_search_dist=5000, step=10.0):
+    """
+    ray_origin: WGS84坐标 (lon, lat, height)
+    dem_data: 存储DEM数据的字典，包含x_range(经度范围)和y_range(纬度范围)
+    """
+    current_pos = np.array(ray_origin, dtype=np.float64)  # 初始为WGS84坐标
 
-    for _ in range(1000):  # 最大迭代1000次
-        # 获取当前点的高程
-        dem_elev = dem_data['interpolator']((current_pos[1], current_pos[0]))  # (lat, lon)
+    for _ in range(1000):
+        print(f"【DEBUG】当前坐标: {current_pos}, 当前方向: {ray_direction}")  # 添加调试输出
 
-        # 碰撞检测
+        current_lon = current_pos[0]
+        current_lat = current_pos[1]
+
+        if (dem_data['x_range'][0] <= current_lon <= dem_data['x_range'][1] and
+            dem_data['y_range'][0] <= current_lat <= dem_data['y_range'][1]):
+            dem_elev = dem_data['interpolator']((current_lat, current_lon))
+            print(f"【DEBUG】DEM高程: {dem_elev}, 当前高度: {current_pos[2]}")  # 添加调试输出
+            # 修改前代码：dem_elev = dem_data['interpolator']((current_lon, current_lat))
+        else:
+            print(f"【错误】坐标 ({current_lon:.6f}, {current_lat:.6f}) 超出DEM范围")
+            return None
+
         if current_pos[2] <= dem_elev:
-            return current_pos
+            return np.array([current_lon, current_lat, current_pos[2]])  # 返回WGS84坐标
 
-        # 动态调整步长（当前高度与地面高度的差值的50%作为步长）
-        height_above_ground = current_pos[2] - dem_elev
-        step = max(1.0, min(height_above_ground * 0.5, 50.0))  # 步长限制在1-50米
-
-        # 检查搜索边界
-        if np.linalg.norm(current_pos - ray_origin) > max_search_dist:
-            break
-
-        # 前进
         current_pos += ray_direction * step
+
+        if np.linalg.norm(current_pos[:2] - np.array(ray_origin[:2])) > max_search_dist:
+            break
 
     return None
 
@@ -650,7 +653,7 @@ def read_points_data(filename, pixel_x, pixel_y, scale):
                 # 添加坐标转换
                 try:
                     logging.debug(f'Processing row {line_count}: lat={latitude}, lon={longitude}')
-                    easting, northing = wgs84_to_utm(latitude, longitude)
+                    easting, northing = geo_transformer.wgs84_to_utm(longitude, latitude)  # 注意顺序
                     pos3d = np.array([easting, northing, height])
                 except ValueError as e:
                     logging.error(f'Error processing row {line_count}: {e}')
@@ -663,7 +666,6 @@ def read_points_data(filename, pixel_x, pixel_y, scale):
                 recs.append(rec)
         logging.debug(f'Processed {line_count} lines.')
         return recs
-
 
 # **********
 # read data from the potential camera locations file
@@ -686,7 +688,7 @@ def read_camera_locations():
                 # 添加坐标转换
                 try:
                     logging.debug(f'Processing row {line_count}: lat={latitude}, lon={longitude}')
-                    easting, northing = wgs84_to_utm(latitude, longitude)
+                    easting, northing = geo_transformer.wgs84_to_utm(longitude, latitude)  # 注意顺序
                     pos3d = np.array([easting, northing, height])
                 except ValueError as e:
                     logging.error(f'Error processing row {line_count}: {e}')
@@ -697,7 +699,6 @@ def read_camera_locations():
                 recs.append(rec)
         logging.debug(f'Processed {line_count} lines.')
         return recs
-
 
 # **********
 # Main function
@@ -733,9 +734,9 @@ def do_it(image_name, features, pixel_x, pixel_y, output, scale, dem_file):
     print(f"【DEBUG】最佳相机位置（ray_origin - 可能是UTM）: {ray_origin}")
 
     # **🚀 确保 ray_origin 是 WGS84 坐标**
-    utm_to_wgs = Transformer.from_crs("epsg:32650", "epsg:4326", always_xy=True)
-    lat, lon = utm_to_wgs.transform(ray_origin[0], ray_origin[1])
-    ray_origin_wgs = np.array([lat, lon, ray_origin[2]], dtype=np.float64)
+    lon, lat = geo_transformer.utm_to_wgs84(ray_origin[0], ray_origin[1])  # 注意顺序
+    ray_origin_wgs = np.array([lon, lat, ray_origin[2] + 10], dtype=np.float64)
+    # 修改前代码：ray_origin_wgs = np.array([lat, lon, ray_origin[2]], dtype=np.float64)
     print(f"【DEBUG】转换后的 ray_origin (WGS84): {ray_origin_wgs}")
 
     best_location = locations[theloci]['pos3d']
@@ -755,7 +756,7 @@ def do_it(image_name, features, pixel_x, pixel_y, output, scale, dem_file):
         print(f"🚨【错误】K 计算失败，使用默认相机矩阵！")
         width, height = im.shape[1], im.shape[0]
         cx, cy = width / 2, height / 2
-        fx = fy = 1000
+        fx = fy = 75
         K = np.array([[fx, 0, cx], [0, fy, cy], [0, 0, 1]], dtype=np.float64)
 
     logging.debug(f'Chosen K: {K}')
@@ -775,20 +776,35 @@ def do_it(image_name, features, pixel_x, pixel_y, output, scale, dem_file):
 
     # **🚀 确保 ray_direction 也转换为 WGS84**
     dx, dy = ray_direction[0], ray_direction[1]
-    lat_shift, lon_shift = utm_to_wgs.transform(ray_origin_wgs[0] + dx, ray_origin_wgs[1] + dy)
+    lon_shift, lat_shift = geo_transformer.utm_to_wgs84(ray_origin[0] + dx, ray_origin[1] + dy)  # 注意顺序
+    # 修改前代码：lon_shift, lat_shift = geo_transformer.transform(ray_origin[0] + dx, ray_origin[1] + dy)  # 注意顺序
 
     # ✅ **计算 `dx, dy` 在 WGS84 下的增量方向**
-    delta_lat = lat_shift - ray_origin_wgs[0]
-    delta_lon = lon_shift - ray_origin_wgs[1]
+    delta_lon = lon_shift - ray_origin_wgs[0]
+    delta_lat = lat_shift - ray_origin_wgs[1]
     delta_z = ray_direction[2]  # 保持 Z 方向不变
+    # 修改前代码：delta_lon = lon_shift - ray_origin_wgs[1]
+    # 修改前代码：delta_lat = lat_shift - ray_origin_wgs[0]
 
     # ✅ **确保 `ray_direction_wgs` 是标准单位向量**
-    ray_direction_wgs = np.array([delta_lat, delta_lon, delta_z], dtype=np.float64)
+    ray_direction_wgs = np.array([delta_lon, delta_lat, delta_z], dtype=np.float64)
     ray_direction_wgs = ray_direction_wgs / np.linalg.norm(ray_direction_wgs)
+    # 修改前代码：ray_direction_wgs = np.array([delta_lat, delta_lon, delta_z], dtype=np.float64)
 
     print(f"【DEBUG】最终用于 DEM 计算的 ray_direction (WGS84) (单位向量): {ray_direction_wgs}, 形状: {ray_direction_wgs.shape}")
 
     dem_data = load_dem_data(dem_file)  # 接收新的DEM数据结构
+
+    # 检查 ray_origin_wgs 是否在 DEM 数据范围内
+    tol = 1e-5  # 容差范围
+    if not (dem_data['x_range'][0] - tol <= ray_origin_wgs[0] <= dem_data['x_range'][1] + tol and
+            dem_data['y_range'][0] - tol <= ray_origin_wgs[1] <= dem_data['y_range'][1] + tol):
+        print(f"【错误】ray_origin_wgs {ray_origin_wgs} 超出 DEM 数据范围")
+        print(f"【DEBUG】DEM 范围: 经度 {dem_data['x_range']}, 纬度 {dem_data['y_range']}")
+        # 修改前代码：
+        # if not (dem_data['x_range'][0] - tol <= ray_origin_wgs[1] <= dem_data['x_range'][1] + tol and
+        #        dem_data['y_range'][0] - tol <= ray_origin_wgs[0] <= dem_data['y_range'][1] + tol):
+        return
 
     while True:
         try:
@@ -808,7 +824,7 @@ def do_it(image_name, features, pixel_x, pixel_y, output, scale, dem_file):
 
             print(f"【DEBUG】转换为浮点数: x={input_pixel_x}, y={input_pixel_y}, input_pixel 形状: {input_pixel.shape}")
 
-            geo_coord = ray_intersect_dem(ray_origin, ray_direction, dem_data)
+            geo_coord = ray_intersect_dem(ray_origin_wgs, ray_direction_wgs, dem_data)
 
             if geo_coord is not None:
                 print(f"像素坐标 ({input_pixel_x}, {input_pixel_y}) 对应的地理坐标: 经度 {geo_coord[0]:.6f}, 纬度 {geo_coord[1]:.6f}")
@@ -819,9 +835,6 @@ def do_it(image_name, features, pixel_x, pixel_y, output, scale, dem_file):
             print(f"输入格式错误: {e}")
         except Exception as e:
             print(f"发生未知错误: {e}")
-
-
-
 
 img = '1898'
 # img = '1900-1910'
