@@ -4,6 +4,7 @@ import numpy as np
 import cv2
 import matplotlib.pyplot as plt
 from matplotlib import font_manager
+from mpl_toolkits.mplot3d import Axes3D
 import csv
 import glob
 import math
@@ -480,25 +481,6 @@ def load_dem_data(dem_file):
     logging.debug(f'DEM 范围: 经度 {dem_data["x_range"]}, 纬度 {dem_data["y_range"]}')
     return dem_data
 
-# 分解单应性矩阵，得到内参矩阵和外参矩阵
-def decompose_homography(M):
-    logging.debug(f'Decomposing homography matrix M: {M}')
-
-    if M.shape != (3, 3):
-        raise ValueError("Input matrix M must be a 3x3 matrix")
-
-    solutions = cv2.decomposeHomographyMat(M, np.eye(3))
-
-    if solutions is None or len(solutions) < 3:
-        raise RuntimeError("Homography decomposition failed, no valid solution found.")
-
-    # 选择第一个解
-    K = np.array(solutions[0], dtype=np.float64)
-    R = solutions[1][0]  # 旋转矩阵，选择第一个解
-    t = solutions[2][0]  # 平移向量，选择第一个解
-
-    return K, R, t
-
 # 使用PnP算法进行相机姿态估计
 def estimate_camera_pose(pos3d, pixels, K):
     pos3d = np.asarray(pos3d, dtype=np.float64).reshape(-1, 3)
@@ -506,10 +488,42 @@ def estimate_camera_pose(pos3d, pixels, K):
     K = np.asarray(K, dtype=np.float64).reshape(3, 3)
     dist_coeffs = np.zeros((4, 1), dtype=np.float64)
 
-    _, rotation_vector, translation_vector, inliers = cv2.solvePnPRansac(pos3d, pixels, K, dist_coeffs)
-    if inliers is None or len(inliers) < 6:
-        raise RuntimeError("PnP RANSAC failed or insufficient inliers.")
+    print("3D points:\n", pos3d)
+    print("2D points:\n", pixels)
+    print("Camera matrix K:\n", K)
 
+    # 可视化3D点
+    fig = plt.figure()
+    ax = fig.add_subplot(121, projection='3d')
+    ax.scatter(pos3d[:, 0], pos3d[:, 1], pos3d[:, 2], c='r', marker='o')
+    ax.set_title('3D Points')
+    ax.set_xlabel('X')
+    ax.set_ylabel('Y')
+    ax.set_zlabel('Z')
+
+    # 可视化2D点
+    ax2 = fig.add_subplot(122)
+    ax2.scatter(pixels[:, 0], pixels[:, 1], c='b', marker='x')
+    ax2.set_title('2D Points')
+    ax2.set_xlabel('Pixel X')
+    ax2.set_ylabel('Pixel Y')
+    ax2.invert_yaxis()  # 图像坐标系的Y轴是向下的
+
+    plt.show()
+
+    # 使用PnP算法估计旋转向量和平移向量
+    success, rotation_vector, translation_vector, inliers = cv2.solvePnPRansac(
+        pos3d, pixels, K, dist_coeffs,
+        iterationsCount=10000,  # 增加迭代次数
+        reprojectionError=75.0,  # 调整RANSAC阈值
+        confidence=0.99  # 提高置信度
+    )
+    print("Inliers:\n", inliers)
+    if not success or inliers is None or len(inliers) < 6:
+        print("PnP RANSAC failed or insufficient inliers.")
+        return None, None
+
+    # 使用LM优化PnP结果
     rotation_vector, translation_vector = cv2.solvePnPRefineLM(pos3d[inliers], pixels[inliers], K, dist_coeffs,
                                                                rotation_vector, translation_vector)
 
@@ -546,18 +560,10 @@ def pixel_to_ray(pixel_x, pixel_y, K, R, ray_origin_utm):
     # 转换到世界坐标系（UTM）
     ray_direction_utm = R @ camera_ray  # 旋转后的方向向量
 
-    # 调整方向向量的比例，使其在各个方向上的移动更加均匀
-    ray_direction_utm[2] *= -1  # 确保Z分量为负值，使射线朝向地面
+    # 确保Z分量为负值，使射线朝向地面
+    ray_direction_utm[2] *= -1
 
     # 归一化方向向量
-    ray_direction_utm /= np.linalg.norm(ray_direction_utm)
-
-    # 增大X和Y方向的分量，使其接近1，同时保持Z方向的分量接近-1
-    ray_direction_utm[0] = np.sign(ray_direction_utm[0]) * min(1.0, abs(ray_direction_utm[0]) * 10)
-    ray_direction_utm[1] = np.sign(ray_direction_utm[1]) * min(1.0, abs(ray_direction_utm[1]) * 10)
-    ray_direction_utm[2] = np.sign(ray_direction_utm[2]) * min(1.0, abs(ray_direction_utm[2]))
-
-    # 再次归一化方向向量
     ray_direction_utm /= np.linalg.norm(ray_direction_utm)
 
     # 将UTM坐标转换为WGS84经纬度（注意顺序：easting->经度，northing->纬度）
@@ -566,7 +572,7 @@ def pixel_to_ray(pixel_x, pixel_y, K, R, ray_origin_utm):
     ray_end_lon, ray_end_lat = geo_transformer.utm_to_wgs84(ray_end_utm[0], ray_end_utm[1])
 
     # 构建WGS84起点（经度在前，纬度在后）
-    ray_origin_wgs = np.array([ray_origin_lon, ray_origin_lat, ray_origin_utm[2] + 50])  # 增加高度偏移量
+    ray_origin_wgs = np.array([ray_origin_lon, ray_origin_lat, ray_origin_utm[2]])  # 不再增加高度偏移量
 
     # 计算方向向量（经度差在前，纬度差在后）
     delta_lon = ray_end_lon - ray_origin_lon
@@ -740,7 +746,7 @@ def do_it(image_name, features, pixel_x, pixel_y, output, scale, dem_file):
 
     # **🚀 确保 ray_origin 是 WGS84 坐标**
     lon, lat = geo_transformer.utm_to_wgs84(ray_origin[0], ray_origin[1])  # 注意顺序
-    ray_origin_wgs = np.array([lon, lat, ray_origin[2] + 50], dtype=np.float64)  # 增加高度偏移量
+    ray_origin_wgs = np.array([lon, lat, ray_origin[2]], dtype=np.float64)  # 不再增加高度偏移量
     print(f"【DEBUG】转换后的 ray_origin (WGS84): {ray_origin_wgs}")
 
     best_location = locations[theloci]['pos3d']
@@ -748,23 +754,24 @@ def do_it(image_name, features, pixel_x, pixel_y, output, scale, dem_file):
 
     find_homographies(recs, [locations[theloci]], im, True, 75.0, output)
 
-    best_homography_matrix, err1, err2 = find_homography(
-        recs, pixels, np.array([rec['pos3d'] for rec in recs]),
-        np.array([rec['symbol'] for rec in recs]), best_location, im,
-        False, 75.0, output
-    )
-    logging.debug(f'Best homography matrix: {best_homography_matrix}, err1: {err1}, err2: {err2}')
-
-    K, R, t = decompose_homography(best_homography_matrix)
-    if K.shape != (3, 3):
-        print(f"🚨【错误】K 计算失败，使用默认相机矩阵！")
-        width, height = im.shape[1], im.shape[0]
-        cx, cy = width / 2, height / 2
-        fx = fy = 75
-        K = np.array([[fx, 0, cx], [0, fy, cy], [0, 0, 1]], dtype=np.float64)
+    # 设置 K 矩阵
+    width, height = im.shape[1], im.shape[0]
+    cx, cy = width / 2, height / 2
+    fx = 3150
+    fy = 1912
+    K = np.array([[fx, 0, cx], [0, fy, cy], [0, 0, 1]], dtype=np.float64)
 
     logging.debug(f'Chosen K: {K}')
     print(f"【DEBUG】K 矩阵: \n{K}")
+
+    # 使用 PnP 算法估计 R 和 T
+    pos3d = np.array([rec['pos3d'] for rec in recs])
+    pixels = np.array([rec['pixel'] for rec in recs])
+    R, t = estimate_camera_pose(pos3d, pixels, K)
+    if R is None or t is None:
+        print("Failed to estimate camera pose using PnP.")
+        return
+    R, _ = cv2.Rodrigues(R)  # 将旋转向量转换为旋转矩阵
 
     dem_data = load_dem_data(dem_file)  # 接收新的DEM数据结构
 
