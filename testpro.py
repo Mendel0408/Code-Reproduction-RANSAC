@@ -559,6 +559,7 @@ def pixel_to_ray(pixel_x, pixel_y, K, R, ray_origin):
     pixel_homogeneous = np.array([pixel_x, pixel_y, 1.0], dtype=np.float64)
     # 使用相机的内参矩阵（K）将图像平面上的2D像素坐标转换为相机坐标系中的3D坐标
     camera_ray = np.linalg.inv(K) @ pixel_homogeneous
+    print(f"【DEBUG】K 矩阵:\n{K}")
     print(f"【DEBUG】使用相机的内参矩阵（K）将图像平面上的2D像素坐标转换为相机坐标系中的3D坐标: {camera_ray}")
 
     camera_ray /= np.linalg.norm(camera_ray)
@@ -582,7 +583,7 @@ def pixel_to_ray(pixel_x, pixel_y, K, R, ray_origin):
     return ray_origin, ray_direction
 
 # 计算射线与DEM的交点
-def ray_intersect_dem(ray_origin, ray_direction, dem_data, max_search_dist=10000, step=1.0):
+def ray_intersect_dem(ray_origin, ray_direction, dem_data, max_search_dist=10000, step=0.00001):
     """
     ray_origin: WGS84坐标 (lon, lat, height)
     dem_data: 存储DEM数据的字典，包含x_range(经度范围)和y_range(纬度范围)
