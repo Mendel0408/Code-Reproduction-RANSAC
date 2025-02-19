@@ -540,6 +540,41 @@ def check_translation_vector(translation_vector):
         translation_vector = np.clip(translation_vector, -max_value, max_value)
     return translation_vector
 
+# 获取DEM数据中的海拔值
+def get_dem_elevation(dem_data, lon, lat):
+    # 在DEM数据中进行插值计算，获取对应经纬度的海拔值
+    dem_elev = dem_data['interpolator']((lat, lon))
+    return dem_elev
+
+# 修正相机位置的海拔值
+def correct_camera_position_wgs84(camera_position, dem_data):
+    """
+    camera_position: PnP求解出的相机位置 (easting, northing, height)
+    dem_data: 存储DEM数据的字典，包含x_range(经度范围)和y_range(纬度范围)
+    """
+    # 将UTM坐标转换为WGS84坐标以获取DEM海拔数据
+    lon, lat = geo_transformer.utm_to_wgs84(camera_position[0], camera_position[1])
+    dem_elev = get_dem_elevation(dem_data, lon, lat)
+
+    # 用DEM海拔值替换相机位置的海拔值，并加上相机支架高度
+    camera_position_wgs84 = np.array([lon, lat, dem_elev + 1.5])
+    return camera_position_wgs84
+
+
+def recalculate_translation_vector(corrected_camera_position_wgs84, R):
+    """
+    根据修正后的相机位置重新计算平移向量 T
+    :param corrected_camera_position_wgs84: 修正后的相机位置 (lon, lat, height)
+    :param R: 相机旋转矩阵
+    :return: 修正后的平移向量 T
+    """
+    # 将修正后的相机位置转换为 UTM 坐标
+    corrected_position_utm = np.array(geo_transformer.wgs84_to_utm(corrected_camera_position_wgs84[0], corrected_camera_position_wgs84[1]) + (corrected_camera_position_wgs84[2],))
+
+    # 计算平移向量 T
+    T = -R @ corrected_position_utm
+    return T
+
 # 将像素坐标转换为射线
 def pixel_to_ray(pixel_x, pixel_y, K, R, ray_origin):
     """
@@ -553,37 +588,33 @@ def pixel_to_ray(pixel_x, pixel_y, K, R, ray_origin):
 
     返回:
         ray_origin: WGS84 下的射线起点 (lon, lat, height)
-        ray_direction: WGS84 下的射线方向单位向量 (delta_lon, delta_lat, delta_height)
+        ray_direction: WGS84 下的射线方向 (X, Y 以度计算，Z 以米计算)
     """
-    # 构建齐次像素坐标 (注意OpenCV坐标系的y轴方向)
+    # 构建齐次像素坐标
     pixel_homogeneous = np.array([pixel_x, pixel_y, 1.0], dtype=np.float64)
-    # 使用相机的内参矩阵（K）将图像平面上的2D像素坐标转换为相机坐标系中的3D坐标
+
+    # 计算相机坐标系中的方向向量
     camera_ray = np.linalg.inv(K) @ pixel_homogeneous
-    print(f"【DEBUG】K 矩阵:\n{K}")
-    print(f"【DEBUG】使用相机的内参矩阵（K）将图像平面上的2D像素坐标转换为相机坐标系中的3D坐标: {camera_ray}")
+    camera_ray[2] = 1.0  # 确保Z分量不过小
+    camera_ray /= np.linalg.norm(camera_ray)  # 归一化
 
-    camera_ray /= np.linalg.norm(camera_ray)
-    # 使用相机的外参矩阵（旋转矩阵R和平移向量t）将相机坐标系中的坐标转换为世界坐标系中的坐标
-    ray_direction = R.T @ camera_ray  # 旋转后的方向向量
-    print(f"【DEBUG】使用相机的外参矩阵（旋转矩阵R和平移向量t）将相机坐标系中的坐标转换为世界坐标系中的坐标: {ray_direction}")
+    # 旋转到世界坐标系
+    ray_direction = R.T @ camera_ray
+    ray_direction /= np.linalg.norm(ray_direction)  # 归一化
 
-    # 确保Z分量为负值，使射线朝向地面
-    if ray_direction[2] > 0:
-        ray_direction *= -1
-
-    # 归一化方向向量
-    ray_direction /= np.linalg.norm(ray_direction)
+    # **不在这里修改 Z 方向单位，而是在步进时处理**
 
     # 调试输出
     print(f"【DEBUG】pixel_homogeneous: {pixel_homogeneous}")
     print(f"【DEBUG】camera_ray (归一化相机坐标): {camera_ray}")
     print(f"【DEBUG】WGS84射线起点: {ray_origin}")
-    print(f"【DEBUG】ray_direction: {ray_direction}")
+    print(f"【DEBUG】最终用于 DEM 计算的 ray_direction (WGS84) (单位向量 - X, Y: 度, Z: 米): {ray_direction}")
 
     return ray_origin, ray_direction
 
+
 # 计算射线与DEM的交点
-def ray_intersect_dem(ray_origin, ray_direction, dem_data, max_search_dist=10000, step=0.00001):
+def ray_intersect_dem(ray_origin, ray_direction, dem_data, max_search_dist=10000, step=0.001):
     """
     ray_origin: WGS84坐标 (lon, lat, height)
     dem_data: 存储DEM数据的字典，包含x_range(经度范围)和y_range(纬度范围)
@@ -607,7 +638,9 @@ def ray_intersect_dem(ray_origin, ray_direction, dem_data, max_search_dist=10000
         if current_pos[2] <= dem_elev:
             return np.array([current_lon, current_lat, current_pos[2]])  # 返回WGS84坐标
 
-        current_pos += ray_direction * step
+        current_pos[0] += step * ray_direction[0]  # X 方向（经度）保持度单位
+        current_pos[1] += step * ray_direction[1]  # Y 方向（纬度）保持度单位
+        current_pos[2] += step * ray_direction[2] * 33000  # Z 方向步进按米计算
 
         if np.linalg.norm(current_pos[:2] - np.array(ray_origin[:2])) > max_search_dist:
             break
@@ -749,6 +782,7 @@ def do_it(image_name, features, pixel_x, pixel_y, output, scale, dem_file):
     pos3d = np.array([rec['pos3d'] for rec in recs])
     pixels = np.array([rec['pixel'] for rec in recs])
     R, t = estimate_camera_pose(pos3d, pixels, K)
+
     if R is None or t is None:
         print("Failed to estimate camera pose using PnP.")
         return
@@ -758,26 +792,25 @@ def do_it(image_name, features, pixel_x, pixel_y, output, scale, dem_file):
     camera_origin = -R.T @ t.flatten()
     print(f"【DEBUG】camera_origin (通过PnP求解): {camera_origin}")
 
-    # 确保 camera_origin 是 WGS84 坐标
-    lon, lat = geo_transformer.utm_to_wgs84(camera_origin[0], camera_origin[1])  # 注意顺序
-    camera_origin_wgs = np.array([lon, lat, camera_origin[2]], dtype=np.float64)
-    print(f"【DEBUG】转换后的 camera_origin (WGS84): {camera_origin_wgs}")
-
-    # 使用 WGS84 坐标的相机位置进行射线方向计算
-    ray_origin = camera_origin_wgs
-    print(f"【DEBUG】用于射线方向计算的相机位置（ray_origin - WGS84）: {ray_origin}")
-
-    best_location = locations[theloci]['pos3d']
-    print('location id: ' + str(theloci) + ' - ' + str(locations[theloci]))
-
-    find_homographies(recs, [locations[theloci]], im, True, 75.0, output)
-
+    # 加载DEM数据
     dem_data = load_dem_data(dem_file)  # 接收新的DEM数据结构
+
+    # 修正相机位置（在WGS84坐标系下）
+    corrected_camera_position_wgs84 = correct_camera_position_wgs84(camera_origin, dem_data)
+    print(f"修正后的相机位置 (WGS84): {corrected_camera_position_wgs84}")
+
+    # 重新计算平移向量 T
+    corrected_T = recalculate_translation_vector(corrected_camera_position_wgs84, R)
+    print(f"修正后的平移向量 T: {corrected_T}")
+
+    # 确保 ray_origin 是 WGS84 坐标
+    ray_origin = corrected_camera_position_wgs84
+    print(f"【DEBUG】用于射线方向计算的相机位置（ray_origin - WGS84）: {ray_origin}")
 
     # 检查 ray_origin 是否在 DEM 数据范围内
     tol = 1e-5  # 容差范围
     if not (dem_data['x_range'][0] - tol <= ray_origin[0] <= dem_data['x_range'][1] + tol and
-            dem_data['y_range'][0] - tol <= ray_origin[1] + tol):
+            dem_data['y_range'][0] - tol <= ray_origin[1] <= dem_data['y_range'][1] + tol):
         print(f"【错误】ray_origin {ray_origin} 超出 DEM 数据范围")
         print(f"【DEBUG】DEM 范围: 经度 {dem_data['x_range']}, 纬度 {dem_data['y_range']}")
         return
@@ -800,15 +833,15 @@ def do_it(image_name, features, pixel_x, pixel_y, output, scale, dem_file):
 
             # 计算射线方向
             ray_origin_wgs, ray_direction = pixel_to_ray(input_pixel_x, input_pixel_y, K, R, ray_origin)
+            print(f"修正后的射线起点: {ray_origin}")
+            print(f"修正后的射线方向: {ray_direction}")
 
-            print(
-                f"【DEBUG】最终用于 DEM 计算的 ray_direction (WGS84) (单位向量): {ray_direction}, 形状: {ray_direction.shape}")
+            print(f"【DEBUG】最终用于 DEM 计算的 ray_direction (WGS84) (单位向量): {ray_direction}, 形状: {ray_direction.shape}")
 
             geo_coord = ray_intersect_dem(ray_origin_wgs, ray_direction, dem_data)
 
             if geo_coord is not None:
-                print(
-                    f"像素坐标 ({input_pixel_x}, {input_pixel_y}) 对应的地理坐标: 经度 {geo_coord[0]:.6f}, 纬度 {geo_coord[1]:.6f}")
+                print(f"像素坐标 ({input_pixel_x}, {input_pixel_y}) 对应的地理坐标: 经度 {geo_coord[0]:.6f}, 纬度 {geo_coord[1]:.6f}")
             else:
                 print(f"无法找到 ({input_pixel_x}, {input_pixel_y}) 对应的地理坐标，请检查输入或 DEM 数据。")
 
