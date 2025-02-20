@@ -612,7 +612,7 @@ def pixel_to_ray(pixel_x, pixel_y, K, R, ray_origin):
 
 
 # 计算射线与DEM的交点
-def ray_intersect_dem_with_scales(ray_origin, ray_direction, dem_data, max_search_dist=10000, step=0.001):
+def ray_intersect_dem_with_scales(ray_origin, ray_direction, scales, dem_data, max_search_dist=10000, step=0.001):
     """
     ray_origin: WGS84坐标 (lon, lat, height)
     dem_data: 存储DEM数据的字典，包含x_range(经度范围)和y_range(纬度范围)
