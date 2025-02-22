@@ -14,7 +14,7 @@ from pyproj import Transformer
 from scipy.spatial import distance
 import seaborn as sns
 from scipy.interpolate import RegularGridInterpolator
-from scipy.optimize import least_squares
+from scipy.optimize import minimize
 from osgeo import gdal
 
 # 设置字体
@@ -609,37 +609,74 @@ def pixel_to_ray(pixel_x, pixel_y, K, R, ray_origin):
     # 如果你的流程中 R 已为从物体到相机坐标的转换，应使用 R.T 进行转换
     utm_ray = R.T @ camera_ray
     utm_ray /= np.linalg.norm(utm_ray)
-    print("【DEBUG】UTM 坐标系下的射线方向 (R.T转换后):", utm_ray)
 
     return ray_origin, utm_ray
 
 
-# 新增函数：根据像素坐标计算射线方向（不输出调试信息），用于控制点部分
-def compute_ray_direction_from_pixel(pixel, K, R, ray_origin):
-    pixel_homogeneous = np.array([pixel[0], pixel[1], 1.0], dtype=np.float64)
-    camera_ray = np.linalg.inv(K) @ pixel_homogeneous
-    camera_ray[2] = 1.0
-    camera_ray = camera_ray / np.linalg.norm(camera_ray)
-    ray_direction = R.T @ camera_ray
-    ray_direction = ray_direction / np.linalg.norm(ray_direction)
-    return ray_direction
+def calculate_weights(input_pixel, control_points, max_weight=1, knn_weight=10):
+    weights = []
+    input_pixel = np.array(input_pixel, dtype=np.float64)  # 确保 input_pixel 是浮点数类型
+    distances = []
+    for cp in control_points:
+        pixel = np.array(cp['pixel'], dtype=np.float64)  # 确保 pixel 是浮点数类型
+        distance = np.linalg.norm(input_pixel - pixel)
+        distances.append(distance)
+        weight = min(1.0 / distance if distance != 0 else 1.0, max_weight)  # 限制权重最大值
+        weights.append(weight)
+
+    # 找到距离最近的控制点并提升其权重
+    min_distance_index = np.argmin(distances)
+    weights[min_distance_index] *= knn_weight
+
+    # 输出每个控制点的距离和权重信息
+    for i, cp in enumerate(control_points):
+        print(f"【DEBUG】控制点 {cp['symbol']} 的距离: {distances[i]}, 权重: {weights[i]}")
+
+    return np.array(weights)
+
+
+def compute_optimization_factors(control_points, K, R, ray_origin):
+    factors = []
+    for cp in control_points:
+        true_geo = np.array(cp['pos3d'], dtype=np.float64)
+        ideal_direction = true_geo - ray_origin
+        norm_ideal = np.linalg.norm(ideal_direction)
+        if norm_ideal == 0:
+            continue
+        ideal_direction /= norm_ideal
+        _, computed_ray = pixel_to_ray(cp['pixel'][0], cp['pixel'][1], K, R, ray_origin)
+        computed_ray /= np.linalg.norm(computed_ray)
+        factor_x = ideal_direction[0] / computed_ray[0]
+        factor_y = ideal_direction[1] / computed_ray[1]
+        factor_z = ideal_direction[2] / computed_ray[2]
+
+        # 增加异常值检测和过滤
+        if abs(factor_x) > 10 or abs(factor_y) > 10 or abs(factor_z) > 10:
+            print(f"【警告】控制点 {cp['symbol']} 的优化因子异常，已过滤: ({factor_x}, {factor_y}, {factor_z})")
+            continue
+
+        factors.append((factor_x, factor_y, factor_z))
+        cp['factors'] = (factor_x, factor_y, factor_z)  # 保存优化因子到控制点
+        print(f"【DEBUG】控制点 {cp['symbol']} 的理想UTM射线方向: {ideal_direction}")
+        print(f"【DEBUG】UTM 坐标系下的射线方向 (R.T转换后): {computed_ray}")
+        print(f"【DEBUG】控制点 {cp['symbol']} 的优化因子: ({factor_x}, {factor_y}, {factor_z})")
+    return factors
+
+def weighted_average_optimization_factors(factors, weights):
+    # 将权重归一化
+    normalized_weights = weights / np.sum(weights)
+    print(f"【DEBUG】归一化权重: {normalized_weights}")
+    weighted_factors = np.average(factors, axis=0, weights=normalized_weights)
+    return weighted_factors
 
 # 计算射线与DEM的交点
-def ray_intersect_dem_with_scales(ray_origin, ray_direction, scales, dem_data, max_search_dist=10000, step=0.1):
-    """
-    ray_origin: UTM 坐标 (easting, northing, height)
-    dem_data: DEM数据字典，DEM插值器是基于WGS84坐标系建立的
-    ray_direction: UTM下的射线方向（单位向量，各分量单位为米）
-    scales: 比例因子数组 [s_x, s_y, s_z]
-    """
+def ray_intersect_dem(ray_origin, ray_direction, dem_data, max_search_dist=10000, step=1):
     current_pos = np.array(ray_origin, dtype=np.float64)
-    for _ in range(10000):
+    step_count = 0  # 初始化步进计数器
+    for _ in range(int(max_search_dist / step)):
         print(f"【DEBUG】当前UTM坐标: {current_pos}, 当前射线方向: {ray_direction}")
         current_easting = current_pos[0]
         current_northing = current_pos[1]
-        # 判断当前UTM坐标是否超出 DEM 的 UTM 范围（假设此处已有 DEM UTM 范围值）
-        # 如果没有直接的 DEM UTM 范围，则只做插值前的转换
-        # 将当前UTM坐标转换为 WGS84 坐标，用于 DEM 插值
         lon, lat = geo_transformer.utm_to_wgs84(current_easting, current_northing)
         try:
             dem_elev = dem_data['interpolator']((lat, lon))
@@ -648,60 +685,15 @@ def ray_intersect_dem_with_scales(ray_origin, ray_direction, scales, dem_data, m
             return None
         print(f"【DEBUG】DEM海拔: {dem_elev}, 当前高度: {current_pos[2]}")
 
-        if current_pos[2] <= dem_elev:
+        if step_count >= 100 and current_pos[2] <= dem_elev:
             return np.array([current_northing, current_easting, current_pos[2]])
 
-        # 更新当前坐标
-        current_pos[0] += step * ray_direction[0] * scales[0]
-        current_pos[1] += step * ray_direction[1] * scales[1]
-        current_pos[2] += step * ray_direction[2] * scales[2]
-        if np.linalg.norm(current_pos[:2] - np.array(ray_origin[:2])) > max_search_dist:
-            break
+        current_pos[0] += step * ray_direction[0]
+        current_pos[1] += step * ray_direction[1]
+        current_pos[2] += step * ray_direction[2]
+        step_count += 1  # 增加步进计数器
 
     return None
-
-# --- 新增函数：利用内点构造残差函数进行比例因子优化 ---
-# 使用相机位置(ray_origin)与控制点真实3D坐标之差构成理想射线方向，
-# 并与 pixel_to_ray 得到的射线方向做元素乘法校正，计算各控制点的残差（向量差），
-# 最后拼接所有残差向量返回给最小二乘优化模块。
-def residual_scales_control_points(scales, control_points, K, R, ray_origin):
-    """
-    对每个控制点（包含图像像素 'pixel' 和UTM下的3D点 'pos3d'）执行下列操作：
-      1. 计算理想射线方向：ideal_direction = normalize(control_point_3d - ray_origin)
-      2. 通过像素计算射线方向（调用修改后的 pixel_to_ray，确保输出为UTM坐标下的向量），并应用比例因子校正；
-      3. 返回校正后的射线方向与理想射线方向之间的向量差作为残差。
-    """
-    errors = []
-    for cp in control_points:
-        true_geo = np.array(cp['pos3d'], dtype=np.float64)
-        ideal_direction = true_geo - ray_origin
-        print(f"【DEBUG】true_geo: {true_geo}")
-        print(f"【DEBUG】ray_origin: {ray_origin}")
-        print(f"【DEBUG】归一化前的ideal_direction: {ideal_direction}")
-        norm_ideal = np.linalg.norm(ideal_direction)
-        if norm_ideal == 0:
-            continue
-        ideal_direction /= norm_ideal
-
-        print(f"【DEBUG】控制点 {cp.get('symbol', '未知')} 的理想UTM射线方向: {ideal_direction}")
-        # 调用修改后的 pixel_to_ray，保证计算结果为 UTM 下的射线方向
-        _, computed_ray = pixel_to_ray(cp['pixel'][0], cp['pixel'][1], K, R, ray_origin)
-        # 应用比例因子校正
-        corrected_ray = np.array([
-            scales[0] * computed_ray[0],
-            scales[1] * computed_ray[1],
-            scales[2] * computed_ray[2]
-        ])
-        norm_corr = np.linalg.norm(corrected_ray)
-        if norm_corr == 0:
-            continue
-        corrected_ray /= norm_corr
-
-        errors.append(corrected_ray - ideal_direction)
-    if errors:
-        return np.concatenate(errors)
-    else:
-        return np.array([])
 
 # 输入像素坐标，输出地理坐标
 def pixel_to_geo(pixel_coord, K, rotation_vector, translation_vector, ray_origin, dem_interpolator, dem_x, dem_y):
@@ -823,7 +815,7 @@ def do_it(image_name, features, pixel_x, pixel_y, output, scale, dem_file):
     width, height = im.shape[1], im.shape[0]
     cx, cy = width / 2, height / 2
     # 相机物理参数（单位：mm）
-    focal_length_mm = 150.0  # 焦距 150mm
+    focal_length_mm = 240.0  # 焦距 150mm
     sensor_width_mm = 127.0  # 传感器宽度 127mm
     sensor_height_mm = 178.0  # 传感器高度 178mm
     # 根据物理参数将焦距换算为像素单位：
@@ -848,7 +840,7 @@ def do_it(image_name, features, pixel_x, pixel_y, output, scale, dem_file):
     R, _ = cv2.Rodrigues(R)
     print(f"【DEBUG】转换后的旋转矩阵 R: \n{R}")
 
-    inlier_indices = inliers.flatten().tolist()
+    # 使用所有 pos3d 中的点作为控制点
     control_points = [
         {
             'pixel': recs[idx]['pixel'],
@@ -856,20 +848,13 @@ def do_it(image_name, features, pixel_x, pixel_y, output, scale, dem_file):
             'dem_data': dem_data,
             'symbol': recs[idx]['symbol']
         }
-        for idx in inlier_indices
+        for idx in range(len(recs))
     ]
-    print("【DEBUG】控制点数据 (UTM):")
-    for cp in control_points:
-        print(cp)
 
     # 使用PnP求解后的相机位置（camera_origin为UTM坐标）
     camera_origin = -R.T @ t.flatten()
     print(f"【DEBUG】PnP求解的相机位置 (UTM): {camera_origin}")
 
-    # --- DEM-based elevation correction ---
-    # The PnP solution typically gives an altitude that is too high.
-    # Correct it by obtaining the DEM elevation at the camera's (E, N) position,
-    # then update the camera origin (adding an observer offset; here we use 1.5 m).
     dem_elev = get_dem_elevation(dem_data, camera_origin[0], camera_origin[1])
     corrected_camera_origin = np.array([camera_origin[0], camera_origin[1], dem_elev + 1.5])
     print(f"【DEBUG】修正后的相机位置 (UTM): {corrected_camera_origin}")
@@ -888,13 +873,16 @@ def do_it(image_name, features, pixel_x, pixel_y, output, scale, dem_file):
         print(f"【DEBUG】DEM 范围 (UTM): 经度 {utm_x_range}, 纬度 {utm_y_range}")
         return
 
+    # 计算每个控制点的优化因子
+    factors = compute_optimization_factors(control_points, K, R, ray_origin)
+
     while True:
         try:
-            input_pixel = input("请输入像素坐标 (x, y) 或输入 'exit' 退出: ").strip()
-            if input_pixel.lower() == 'exit':
+            input_pixel_str = input("请输入像素坐标 (x, y) 或输入 'exit' 退出: ").strip()
+            if input_pixel_str.lower() == 'exit':
                 break
 
-            pixel_values = input_pixel.replace(" ", "").replace("，", ",").split(",")
+            pixel_values = input_pixel_str.replace(" ", "").replace("，", ",").split(",")
             if len(pixel_values) != 2:
                 print("输入格式错误，例：755,975")
                 continue
@@ -902,18 +890,27 @@ def do_it(image_name, features, pixel_x, pixel_y, output, scale, dem_file):
             input_pixel_x, input_pixel_y = map(float, pixel_values)
             print(f"【DEBUG】转换为浮点数: x={input_pixel_x}, y={input_pixel_y}")
 
+            input_pixel = [input_pixel_x, input_pixel_y]  # 使用输入的像素坐标
+            weights = calculate_weights(input_pixel, control_points)
+            optimized_factors = weighted_average_optimization_factors(factors, weights)
+            print(f"【DEBUG】最终优化因子: {optimized_factors}")
+
             ray_origin_utm, ray_direction = pixel_to_ray(input_pixel_x, input_pixel_y, K, R, ray_origin)
             print(f"【DEBUG】ray_origin (UTM) from pixel_to_ray: {ray_origin_utm}")
             print(f"【DEBUG】初始射线方向 (UTM): {ray_direction}")
 
-            initial_scales = np.array([1.0, 1.0, 1.0])
-            result = least_squares(
-                lambda s: residual_scales_control_points(s, control_points, K, R, ray_origin_utm),
-                x0=initial_scales)
-            optimized_scales = result.x
-            print(f"【DEBUG】优化后的比例因子 (基于控制点内点): {optimized_scales}")
+            # 应用最终优化因子校正射线方向
+            corrected_ray_direction = np.array([
+                ray_direction[0] * optimized_factors[0],
+                ray_direction[1] * optimized_factors[1],
+                ray_direction[2] * optimized_factors[2]
+            ])
+            print(f"【DEBUG】校正前的射线方向分量 (UTM): {corrected_ray_direction}")
 
-            geo_coord = ray_intersect_dem_with_scales(ray_origin_utm, ray_direction, optimized_scales, dem_data)
+            corrected_ray_direction /= np.linalg.norm(corrected_ray_direction)
+            print(f"【DEBUG】标准化后的校正射线方向 (UTM): {corrected_ray_direction}")
+
+            geo_coord = ray_intersect_dem(ray_origin_utm, corrected_ray_direction, dem_data)
             if geo_coord is not None:
                 print(f"像素坐标 ({input_pixel_x}, {input_pixel_y}) 对应的UTM地理坐标:")
                 print(f"Easting: {geo_coord[0]:.2f}, Northing: {geo_coord[1]:.2f}, 高度: {geo_coord[2]:.2f}")
