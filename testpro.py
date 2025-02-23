@@ -536,7 +536,7 @@ def estimate_camera_pose(pos3d, pixels, K):
     success, rotation_vector, translation_vector, inliers = cv2.solvePnPRansac(
         pos3d, pixels, K, dist_coeffs,
         iterationsCount=5000,
-        reprojectionError=30.0,
+        reprojectionError=60.0,
         confidence=0.99
     )
     print("Inliers:\n", inliers)
@@ -613,7 +613,7 @@ def pixel_to_ray(pixel_x, pixel_y, K, R, ray_origin):
     return ray_origin, utm_ray
 
 
-def calculate_weights(input_pixel, control_points, max_weight=1, knn_weight=10):
+def calculate_weights(input_pixel, control_points, max_weight=1, knn_weight=30):
     weights = []
     input_pixel = np.array(input_pixel, dtype=np.float64)  # 确保 input_pixel 是浮点数类型
     distances = []
@@ -640,6 +640,7 @@ def compute_optimization_factors(control_points, K, R, ray_origin):
     for cp in control_points:
         true_geo = np.array(cp['pos3d'], dtype=np.float64)
         ideal_direction = true_geo - ray_origin
+        print(f"【DEBUG】归一化前的理想UTM射线方向: {ideal_direction}")
         norm_ideal = np.linalg.norm(ideal_direction)
         if norm_ideal == 0:
             continue
@@ -738,7 +739,7 @@ def read_points_data(filename, pixel_x, pixel_y, scale):
                 try:
                     logging.debug(f'Processing row {line_count}: lat={latitude}, lon={longitude}')
                     easting, northing = geo_transformer.wgs84_to_utm(longitude, latitude)  # 注意顺序
-                    pos3d = np.array([easting, northing, height])
+                    pos3d = np.array([easting, northing, elevation])
                 except ValueError as e:
                     logging.error(f'Error processing row {line_count}: {e}')
                     continue
@@ -813,7 +814,8 @@ def do_it(image_name, features, pixel_x, pixel_y, output, scale, dem_file):
 
     # 设置 K 矩阵
     width, height = im.shape[1], im.shape[0]
-    cx, cy = width / 2, height / 2
+    cx = 1071
+    cy = 759.645631
     # 相机物理参数（单位：mm）
     focal_length_mm = 240.0  # 焦距 150mm
     sensor_width_mm = 127.0  # 传感器宽度 127mm
