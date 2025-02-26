@@ -9,17 +9,15 @@ import csv
 import glob
 import math
 import logging
-import pyproj
 from pyproj import Transformer
 from scipy.spatial import distance
 import seaborn as sns
 from scipy.interpolate import RegularGridInterpolator
-from scipy.optimize import minimize
+from scipy.spatial import Delaunay
 from osgeo import gdal
 import json
 import geopandas as gpd
-from shapely.geometry import Polygon
-import alphashape
+
 
 # 设置字体
 plt.rcParams['font.sans-serif'] = ['SimHei']  # 使用黑体
@@ -294,7 +292,7 @@ def calibrate_camera(size):
 # **********
 # Find homographies function
 # **********
-def find_homographies(recs, camera_locations, im, show, ransacbound, outputfile):
+def find_homographies(recs, camera_locations, im, show, ransacbound, output):
     pixels = []
     pos3ds = []
     symbols = []
@@ -315,11 +313,12 @@ def find_homographies(recs, camera_locations, im, show, ransacbound, outputfile)
     num_matches = np.zeros((loc3ds.shape[0], 2))
     scores = []
     for i in range(0, grids.shape[0], 1):  # 50
+        grid_code_min = 0
         if grids[i] >= grid_code_min:
             if show:
                 print(i, grids[i], loc3ds[i])
             M, num_matches[i, 0], num_matches[i, 1] = find_homography(recs, pixels, pos3ds, symbols, loc3ds[i], im, show,
-                                                                   ransacbound, outputfile)
+                                                                   ransacbound, output)
         else:
             num_matches[i, :] = 0
         score = [i + 1, num_matches[i, 0], num_matches[i, 1], grids[i], loc3ds[i][0], loc3ds[i][1], loc3ds[i][2]]
@@ -540,7 +539,7 @@ def estimate_camera_pose(pos3d, pixels, K):
     success, rotation_vector, translation_vector, inliers = cv2.solvePnPRansac(
         pos3d, pixels, K, dist_coeffs,
         iterationsCount=5000,
-        reprojectionError=60.0,
+        reprojectionError=30.0,
         confidence=0.99
     )
     print("Inliers:\n", inliers)
@@ -690,8 +689,8 @@ def ray_intersect_dem(ray_origin, ray_direction, dem_data, max_search_dist=10000
             return None
         print(f"【DEBUG】DEM海拔: {dem_elev}, 当前高度: {current_pos[2]}")
 
-        if step_count >= 100 and current_pos[2] <= dem_elev:
-            return np.array([current_northing, current_easting, current_pos[2]])
+        if step_count >= 150 and current_pos[2] <= dem_elev:
+            return np.array([current_easting, current_northing, current_pos[2]])
 
         current_pos[0] += step * ray_direction[0]
         current_pos[1] += step * ray_direction[1]
@@ -759,7 +758,7 @@ def read_points_data(filename, pixel_x, pixel_y, scale):
 # **********
 # read data from the potential camera locations file
 # **********
-def read_camera_locations():
+def read_camera_locations(camera_locations):
     with open(camera_locations, encoding='utf-8') as csv_file:
         csv_reader = csv.reader(csv_file, delimiter=',')
         line_count = 0
@@ -789,30 +788,101 @@ def read_camera_locations():
         logging.debug(f'Processed {line_count} lines.')
         return recs
 
-
 # 从JSON文件中读取边界点
 def read_boundary_points(json_file):
     with open(json_file, 'r', encoding='utf-8') as f:
         data = json.load(f)
 
-    boundary_points = data['objects'][0]['segmentation'][0]  # Assuming there's only one object with boundary points
+    boundary_points = data['objects'][0]['segmentation']  # 读取所有边界点
+    print(f"【DEBUG】boundary_points: {boundary_points}")
     return boundary_points
 
 # 将边界像素坐标转换为地理坐标
-def convert_boundary_to_geo(boundary_points, K, R, t, dem_data):
+def convert_boundary_to_geo(boundary_points, K, R, t, dem_interpolator, dem_x, dem_y):
     geo_coords = []
-    for point in boundary_points:
-        pixel_x, pixel_y = point
-        geo_coord = pixel_to_geo([pixel_x, pixel_y], K, R, t, dem_data)
-        if geo_coord is not None:
-            geo_coords.append(geo_coord)
+
+    for point in boundary_points:  # ✅ 直接遍历 boundary_points
+        if isinstance(point, list) and len(point) == 2:
+            pixel_x, pixel_y = point  # ✅ 正确解析 (x, y)
+            print(f"【DEBUG】转换像素点 ({pixel_x}, {pixel_y})")
+
+            geo_coord = pixel_to_geo([pixel_x, pixel_y], K, R, t, dem_interpolator, dem_x, dem_y)
+
+            if geo_coord is None:
+                print(f"【WARNING】像素点 ({pixel_x}, {pixel_y}) 转换失败")
+            else:
+                geo_coords.append(geo_coord)
+        else:
+            print(f"【WARNING】无效的边界点: {point}")
+
+    print(f"【DEBUG】成功转换 {len(geo_coords)} 个地理坐标: {geo_coords}")
+
+    if not geo_coords:
+        raise ValueError("所有边界点转换失败，geo_coords 为空")
+
     return geo_coords
+
 
 # 使用alphashape生成边界
 def generate_boundary(geo_coords, alpha=0.1):
-    points = np.array(geo_coords)[:, :2]  # Only use x and y coordinates
-    alpha_shape = alphashape.alphashape(points, alpha)
-    return alpha_shape
+    """
+    使用 alpha 形状算法生成边界。
+
+    参数:
+    - geo_coords: 地理坐标列表 (x, y, z)。
+    - alpha: alpha 形状算法的 alpha 值。
+
+    返回:
+    - boundary: 边界点列表。
+    """
+    # 确保 geo_coords 是二维数组
+    geo_coords = np.array(geo_coords)
+    if geo_coords.size == 0:
+        raise ValueError("geo_coords 数组为空，无法生成边界")
+    if geo_coords.ndim == 1:
+        geo_coords = np.expand_dims(geo_coords, axis=0)
+
+    # 使用二维坐标 (x, y)
+    points = geo_coords[:, :2]
+
+    tri = Delaunay(points)
+    edges = set()
+    edge_points = []
+
+    def add_edge(edges, edge_points, coords, i, j):
+        """ 如果边 (i, j) 不在列表中，则添加线段 """
+        if (i, j) in edges or (j, i) in edges:
+            return
+        edges.add((i, j))
+        edge_points.append(coords[ [i, j] ])
+
+    # 遍历三角形:
+    # ia, ib, ic 是三角形角点的索引
+    for ia, ib, ic in tri.vertices:
+        pa = points[ia]
+        pb = points[ib]
+        pc = points[ic]
+
+        # 三角形边的长度
+        a = np.linalg.norm(pa - pb)
+        b = np.linalg.norm(pb - pc)
+        c = np.linalg.norm(pc - pa)
+
+        # 三角形的半周长
+        s = (a + b + c) / 2.0
+
+        # 用海伦公式计算三角形的面积
+        area = np.sqrt(s * (s - a) * (s - b) * (s - c))
+        circum_r = a * b * c / (4.0 * area)
+
+        # 这里是半径过滤器。
+        if circum_r < 1.0 / alpha:
+            add_edge(edges, edge_points, points, ia, ib)
+            add_edge(edges, edge_points, points, ib, ic)
+            add_edge(edges, edge_points, points, ic, ia)
+
+    boundary = np.concatenate(edge_points)
+    return boundary
 
 # 绘制边界
 def plot_boundary(alpha_shape):
@@ -843,7 +913,7 @@ def do_it(image_name, json_file, features, camera_locations, pixel_x, pixel_y, o
     plt.imshow(im)
 
     recs = read_points_data(features, pixel_x, pixel_y, scale)
-    locations = read_camera_locations()
+    locations = read_camera_locations(camera_locations)
     for rec in recs:
         symbol = rec['symbol']
         pixel = rec['pixel']
@@ -973,7 +1043,8 @@ def do_it(image_name, json_file, features, camera_locations, pixel_x, pixel_y, o
     boundary_points = read_boundary_points(json_file)
 
     # 将边界点转换为地理坐标
-    geo_coords = convert_boundary_to_geo(boundary_points, K, R, t, dem_data)
+    geo_coords = convert_boundary_to_geo(boundary_points, K, R, t, dem_data['interpolator'], dem_data['x_range'], dem_data['y_range'])
+    print(f"【DEBUG】dem_data: {dem_data}")
 
     # 使用alphashape生成边界
     alpha_shape = generate_boundary(geo_coords, alpha=0.1)
