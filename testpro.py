@@ -16,6 +16,9 @@ import seaborn as sns
 from scipy.interpolate import RegularGridInterpolator
 from scipy.optimize import minimize
 from osgeo import gdal
+import json
+import geopandas as gpd
+from shapely.geometry import Polygon
 
 # 设置字体
 plt.rcParams['font.sans-serif'] = ['SimHei']  # 使用黑体
@@ -151,6 +154,24 @@ def plot_ransac_scatter(inliers, outliers):
     plt.grid(True)
     plt.show()
 
+
+def plot_reprojection_errors(pixels, reprojected_points):
+    """
+    绘制重投影误差图
+    :param pixels: 原始像素坐标
+    :param reprojected_points: 重投影后的像素坐标
+    """
+    plt.figure(figsize=(10, 10))
+    for orig_pixel, reproj_pixel in zip(pixels, reprojected_points):
+        plt.plot([orig_pixel[0], reproj_pixel[0]], [orig_pixel[1], reproj_pixel[1]], color='blue', linewidth=1)
+        plt.scatter(orig_pixel[0], orig_pixel[1], c='green', marker='o')
+        plt.scatter(reproj_pixel[0], reproj_pixel[1], c='red', marker='x')
+    plt.title('重投影误差图')
+    plt.xlabel('像素 X 坐标')
+    plt.ylabel('像素 Y 坐标')
+    plt.grid(True)
+    plt.savefig('reprojection_errors.png')
+    plt.show()
 
 # **********
 # Calculate true and pixel distances between features
@@ -536,7 +557,7 @@ def estimate_camera_pose(pos3d, pixels, K):
     success, rotation_vector, translation_vector, inliers = cv2.solvePnPRansac(
         pos3d, pixels, K, dist_coeffs,
         iterationsCount=5000,
-        reprojectionError=60.0,
+        reprojectionError=30.0,
         confidence=0.99
     )
     print("Inliers:\n", inliers)
@@ -549,6 +570,22 @@ def estimate_camera_pose(pos3d, pixels, K):
     print(f"Rotation Vector (R):\n{rotation_vector}")
     print(f"Translation Vector (T):\n{translation_vector}")
     return rotation_vector, translation_vector, inliers
+
+def reproject_points(pos3d, K, R, T):
+    """
+    将3D点重投影到图像平面上
+    :param pos3d: 3D点数组
+    :param K: 相机内参矩阵
+    :param R: 旋转矩阵
+    :param T: 平移向量
+    :return: 重投影点数组
+    """
+    pos3d_homogeneous = np.hstack((pos3d, np.ones((pos3d.shape[0], 1))))  # 将3D点转换为齐次坐标
+    projection_matrix = K @ np.hstack((R, T.reshape(-1, 1)))  # 计算投影矩阵
+    reprojected_points = projection_matrix @ pos3d_homogeneous.T  # 进行投影变换
+    reprojected_points = reprojected_points.T  # 转置使维度匹配
+    reprojected_points /= reprojected_points[:, 2].reshape(-1, 1)  # 齐次坐标归一化
+    return reprojected_points[:, :2]
 
 # 检查并调整translation_vector的值
 def check_translation_vector(translation_vector):
@@ -613,7 +650,7 @@ def pixel_to_ray(pixel_x, pixel_y, K, R, ray_origin):
     return ray_origin, utm_ray
 
 
-def calculate_weights(input_pixel, control_points, max_weight=1, knn_weight=30):
+def calculate_weights(input_pixel, control_points, max_weight=1, knn_weight=10):
     weights = []
     input_pixel = np.array(input_pixel, dtype=np.float64)  # 确保 input_pixel 是浮点数类型
     distances = []
@@ -686,8 +723,8 @@ def ray_intersect_dem(ray_origin, ray_direction, dem_data, max_search_dist=10000
             return None
         print(f"【DEBUG】DEM海拔: {dem_elev}, 当前高度: {current_pos[2]}")
 
-        if step_count >= 100 and current_pos[2] <= dem_elev:
-            return np.array([current_northing, current_easting, current_pos[2]])
+        if step_count >= 160 and current_pos[2] <= dem_elev:
+            return np.array([current_easting, current_northing, current_pos[2]])
 
         current_pos[0] += step * ray_direction[0]
         current_pos[1] += step * ray_direction[1]
@@ -785,10 +822,51 @@ def read_camera_locations():
         logging.debug(f'Processed {line_count} lines.')
         return recs
 
+# 读取JSON文件
+def read_boundary_points(json_file):
+    with open(json_file, 'r', encoding='utf-8') as f:
+        data = json.load(f)
+
+    boundary_points = data['objects'][0]['segmentation'][0]  # Assuming there's only one object with boundary points
+    return boundary_points
+
+# 边界点影像定位
+def convert_boundary_to_geo(boundary_points, K, R, t, dem_data):
+    geo_coords = []
+    for point in boundary_points:
+        pixel_x, pixel_y = point
+        geo_coord = pixel_to_geo([pixel_x, pixel_y], K, R, t, dem_data)
+        if geo_coord is not None:
+            geo_coords.append(geo_coord)
+    return geo_coords
+
+# alpha生成边界
+def generate_boundary(geo_coords, alpha=0.1):
+    points = np.array(geo_coords)[:, :2]  # Only use x and y coordinates
+    alpha_shape = alphashape.alphashape(points, alpha)
+    return alpha_shape
+
+# 绘制边界区域
+def plot_boundary(geo_coords):
+    geo_coords.append(geo_coords[0])  # Close the polygon by appending the first point at the end
+    x, y, z = zip(*geo_coords)
+    plt.figure(figsize=(10, 6))
+    plt.plot(x, y, marker='o')
+    plt.title('Boundary Region')
+    plt.xlabel('Easting')
+    plt.ylabel('Northing')
+    plt.show()
+
+# 生成Shape文件
+def save_boundary_as_shapefile(geo_coords, output_shapefile):
+    polygon = Polygon(geo_coords)
+    gdf = gpd.GeoDataFrame(index=[0], crs='EPSG:32650', geometry=[polygon])  # UTM Zone 50N
+    gdf.to_file(output_shapefile)
+
 # **********
-# Main function
+# 运行
 # **********
-def do_it(image_name, features, pixel_x, pixel_y, output, scale, dem_file):
+def do_it(image_name, json_file, features, camera_locations, pixel_x, pixel_y, output, scale, dem_file):
     im = cv2.imread(image_name)
     im2 = np.copy(im)
     im[:, :, 0] = im2[:, :, 2]
@@ -814,10 +892,10 @@ def do_it(image_name, features, pixel_x, pixel_y, output, scale, dem_file):
 
     # 设置 K 矩阵
     width, height = im.shape[1], im.shape[0]
-    cx = 1071
-    cy = 759.645631
+    cx = 9.82666819e+02
+    cy = 6.97950868e+02
     # 相机物理参数（单位：mm）
-    focal_length_mm = 240.0  # 焦距 150mm
+    focal_length_mm = 240.0  # 焦距 240mm
     sensor_width_mm = 127.0  # 传感器宽度 127mm
     sensor_height_mm = 178.0  # 传感器高度 178mm
     # 根据物理参数将焦距换算为像素单位：
@@ -836,11 +914,22 @@ def do_it(image_name, features, pixel_x, pixel_y, output, scale, dem_file):
     pos3d = np.array([rec['pos3d'] for rec in recs])
     pixels = np.array([rec['pixel'] for rec in recs])
     R, t, inliers = estimate_camera_pose(pos3d, pixels, K)
+
     if R is None or t is None:
         print("Failed to estimate camera pose using PnP.")
         return
     R, _ = cv2.Rodrigues(R)
     print(f"【DEBUG】转换后的旋转矩阵 R: \n{R}")
+
+    # 使用PnP求解的结果将特征点重投影回照片上
+    reprojected_points = reproject_points(pos3d, K, R, t)
+
+    # 计算重投影误差
+    reprojection_errors = np.linalg.norm(pixels - reprojected_points, axis=1)
+    print(f"重投影误差: {reprojection_errors}")
+
+    # 绘制重投影误差图
+    plot_reprojection_errors(pixels, reprojected_points)
 
     # 使用所有 pos3d 中的点作为控制点
     control_points = [
@@ -924,225 +1013,175 @@ def do_it(image_name, features, pixel_x, pixel_y, output, scale, dem_file):
         except Exception as e:
             print(f"发生未知错误: {e}")
 
-img = '1898'
-# img = '1900-1910'
-# img = '1910'
-# img = '1912s'
-# img = '1915 (2)'
-# img = '1915'
-# img = '1920-1930'
-# img = '1925-1930'
-# img = '1930'
-# img = 'center of the settlement kuliang'
-# img = 'kuliang hills'
-# img = 'kuliang panorama central segment'
-# img = 'kuliang Pine Crag road'
-# img = 'Siems Siemssen'
-# img = 'View Kuliang includes tennis courts'
-# img = 'Worley Family-20'
+    # 读取JSON文件中的边界点
+    boundary_points = read_boundary_points(json_file)
 
-camera_locations = ''
-grid_code_min = 0
+    # 将边界点转换为地理坐标
+    geo_coords = convert_boundary_to_geo(boundary_points, K, R, t, dem_data)
 
-if img == '1898':
-    ret, mtx, dist, rvecs, tvecs = calibrate_camera(23)
-    if ret is None:
-        logging.error("Camera calibration failed.")
-    else:
-        img = cv2.imread('1898.jpg')
-        h, w = img.shape[:2]
-        newcameramtx, roi = cv2.getOptimalNewCameraMatrix(mtx, dist, (w, h), 1, (w, h))
-        dst = cv2.undistort(img, mtx, dist, None, newcameramtx)  # un-distort
-        cv2.imwrite('dst1898.jpg', dst)
+    # 使用alphashape生成边界
+    alpha_shape = generate_boundary(geo_coords, alpha=0.1)
 
-        image_name = 'dst1898.jpg'
-        features = 'feature_points_with_annotations.csv'
-        camera_locations = 'potential_camera_locations.csv'
-        pixel_x = 'Pixel_x_1898.jpg'
-        pixel_y = 'Pixel_y_1898.jpg'
-        output = 'zOutput_1898.png'
-        scale = 1.0
-        dem_file = 'dem_data.tif'
+    # 绘制边界区域
+    plot_boundary(alpha_shape)
 
+    # 将边界保存为Shapefile
+    save_boundary_as_shapefile(alpha_shape, output)
 
-elif img == '1900-1910':
-    ret, mtx, dist, rvecs, tvecs = calibrate_camera(23)
-    img = cv2.imread('1900-1910.jpg')
-    h, w = img.shape[:2]
-    newcameramtx, roi = cv2.getOptimalNewCameraMatrix(mtx, dist, (w, h), 1, (w, h))
-    dst = cv2.undistort(img, mtx, dist, None, newcameramtx)  # un-distort
-    cv2.imwrite('dst1900-1910.png', dst)
+    print('Boundary region saved as shapefile:', output)
 
-    image_name = 'dst1900-1910.png'
-    features = 'feature_points_with_annotations.csv'
-    camera_locations = 'potential_camera_locations.csv'
-    pixel_x = 'Pixel_x_1900-1910.jpg'
-    pixel_y = 'Pixel_y_1900-1910.jpg'
-    output = 'zOutput_1900-1910.png'
-    scale = 1.0
+# 主函数处理多个图像
+def main():
+    images_info = [
+        {
+            "image_name": "1898.jpg",
+            "json_file": "1898.json",
+            "features": "feature_points_with_annotations.csv",
+            "camera_locations": "potential_camera_locations.csv",
+            "pixel_x": "Pixel_x_1898.jpg",
+            "pixel_y": "Pixel_y_1898.jpg",
+            "output": "zOutput_1898.png",
+            "scale": 1.0,
+            "dem_file": "dem_data.tif"
+        },
+        {
+             "image_name": "1900-1910.jpg",
+             "json_file": "1900-1910.json",
+             "features": "feature_points_with_annotations.csv",
+             "camera_locations": "potential_camera_locations.csv",
+             "pixel_x": "Pixel_x_1900-1910.jpg",
+             "pixel_y": "Pixel_y_1900-1910.jpg",
+             "output": "zOutput_1900-1910.png",
+             "scale": 1.0,
+             "dem_file": "dem_data.tif"
+        }
+        # 添加更多图像的信息
+        # {
+        #     "image_name": "another_image.jpg",
+        #     "json_file": "another.json",
+        #     "features": "another_features.csv",
+        #     "camera_locations": "another_camera_locations.csv",
+        #     "pixel_x": "Pixel_x_another.jpg",
+        #     "pixel_y": "Pixel_y_another.jpg",
+        #     "output": "zOutput_another.png",
+        #     "scale": 1.0,
+        #     "dem_file": "dem_data_another.tif"
+        # }
+        # 添加更多图像的信息
+        # {
+        #     "image_name": "another_image.jpg",
+        #     "json_file": "another.json",
+        #     "features": "another_features.csv",
+        #     "camera_locations": "another_camera_locations.csv",
+        #     "pixel_x": "Pixel_x_another.jpg",
+        #     "pixel_y": "Pixel_y_another.jpg",
+        #     "output": "zOutput_another.png",
+        #     "scale": 1.0,
+        #     "dem_file": "dem_data_another.tif"
+        # }
+        # 添加更多图像的信息
+        # {
+        #     "image_name": "another_image.jpg",
+        #     "json_file": "another.json",
+        #     "features": "another_features.csv",
+        #     "camera_locations": "another_camera_locations.csv",
+        #     "pixel_x": "Pixel_x_another.jpg",
+        #     "pixel_y": "Pixel_y_another.jpg",
+        #     "output": "zOutput_another.png",
+        #     "scale": 1.0,
+        #     "dem_file": "dem_data_another.tif"
+        # }
+        # 添加更多图像的信息
+        # {
+        #     "image_name": "another_image.jpg",
+        #     "json_file": "another.json",
+        #     "features": "another_features.csv",
+        #     "camera_locations": "another_camera_locations.csv",
+        #     "pixel_x": "Pixel_x_another.jpg",
+        #     "pixel_y": "Pixel_y_another.jpg",
+        #     "output": "zOutput_another.png",
+        #     "scale": 1.0,
+        #     "dem_file": "dem_data_another.tif"
+        # }
+        # 添加更多图像的信息
+        # {
+        #     "image_name": "another_image.jpg",
+        #     "json_file": "another.json",
+        #     "features": "another_features.csv",
+        #     "camera_locations": "another_camera_locations.csv",
+        #     "pixel_x": "Pixel_x_another.jpg",
+        #     "pixel_y": "Pixel_y_another.jpg",
+        #     "output": "zOutput_another.png",
+        #     "scale": 1.0,
+        #     "dem_file": "dem_data_another.tif"
+        # }
+        # 添加更多图像的信息
+        # {
+        #     "image_name": "another_image.jpg",
+        #     "json_file": "another.json",
+        #     "features": "another_features.csv",
+        #     "camera_locations": "another_camera_locations.csv",
+        #     "pixel_x": "Pixel_x_another.jpg",
+        #     "pixel_y": "Pixel_y_another.jpg",
+        #     "output": "zOutput_another.png",
+        #     "scale": 1.0,
+        #     "dem_file": "dem_data_another.tif"
+        # }
+        # 添加更多图像的信息
+        # {
+        #     "image_name": "another_image.jpg",
+        #     "json_file": "another.json",
+        #     "features": "another_features.csv",
+        #     "camera_locations": "another_camera_locations.csv",
+        #     "pixel_x": "Pixel_x_another.jpg",
+        #     "pixel_y": "Pixel_y_another.jpg",
+        #     "output": "zOutput_another.png",
+        #     "scale": 1.0,
+        #     "dem_file": "dem_data_another.tif"
+        # }
+        # 添加更多图像的信息
+        # {
+        #     "image_name": "another_image.jpg",
+        #     "json_file": "another.json",
+        #     "features": "another_features.csv",
+        #     "camera_locations": "another_camera_locations.csv",
+        #     "pixel_x": "Pixel_x_another.jpg",
+        #     "pixel_y": "Pixel_y_another.jpg",
+        #     "output": "zOutput_another.png",
+        #     "scale": 1.0,
+        #     "dem_file": "dem_data_another.tif"
+        # }
+        # 添加更多图像的信息
+        # {
+        #     "image_name": "another_image.jpg",
+        #     "json_file": "another.json",
+        #     "features": "another_features.csv",
+        #     "camera_locations": "another_camera_locations.csv",
+        #     "pixel_x": "Pixel_x_another.jpg",
+        #     "pixel_y": "Pixel_y_another.jpg",
+        #     "output": "zOutput_another.png",
+        #     "scale": 1.0,
+        #     "dem_file": "dem_data_another.tif"
+        # }
+    ]
 
-elif img == '1910':
-    ret, mtx, dist, rvecs, tvecs = calibrate_camera(23)
-    img = cv2.imread('1910.jpg')
-    h, w = img.shape[:2]
-    newcameramtx, roi = cv2.getOptimalNewCameraMatrix(mtx, dist, (w, h), 1, (w, h))
-    dst = cv2.undistort(img, mtx, dist, None, newcameramtx)  # un-distort
-    cv2.imwrite('dst1910.png', dst)
+    # 指定要处理的图像信息
+    target_info = images_info[0]  # 修改此索引以选择要处理的图像，例如 0 表示处理第一个图像
 
-    image_name = 'dst1910.png'
-    features = 'feature_points_with_annotations.csv'
-    camera_locations = 'potential_camera_locations.csv'
-    pixel_x = 'Pixel_x_1910.jpg'
-    pixel_y = 'Pixel_y_1910.jpg'
-    output = 'zOutput_1910.png'
-    scale = 1.0
+    do_it(
+        target_info["image_name"],
+        target_info["json_file"],
+        target_info["features"],
+        target_info["camera_locations"],
+        target_info["pixel_x"],
+        target_info["pixel_y"],
+        target_info["output"],
+        target_info["scale"],
+        target_info["dem_file"]
+    )
 
-
-elif img == '1912s':
-    image_name = '1912s.jpg'
-    features = 'feature_points_with_annotations.csv'
-    camera_locations = 'potential_camera_locations.csv'
-    pixel_x = 'Pixel_x_1912s.jpg'
-    pixel_y = 'Pixel_y_1912s.jpg'
-    output = 'zOutput_1912s.png'
-    scale = 1.0
-
-
-elif img == '1915 (2)':
-    image_name = '1915 (2).jpg'
-    features = 'feature_points_with_annotations.csv'
-    camera_locations = 'potential_camera_locations.csv'
-    pixel_x = 'Pixel_x_1915 (2).jpg'
-    pixel_y = 'Pixel_y_1915 (2).jpg'
-    output = 'zOutput_1915 (2).png'
-    scale = 1.0
-
-
-elif img == '1915':
-    image_name = '1915.jpg'
-    features = 'feature_points_with_annotations.csv'
-    camera_locations = 'potential_camera_locations.csv'
-    pixel_x = 'Pixel_x_1915.jpg'
-    pixel_y = 'Pixel_y_1915.jpg'
-    output = 'zOutput_1915.png'
-    scale = 1.0
-
-
-elif img == '1920-1930':
-    image_name = '1920-1930.jpg'
-    features = 'feature_points_with_annotations.csv'
-    camera_locations = 'potential_camera_locations.csv'
-    pixel_x = 'Pixel_x_1920-1930.jpg'
-    pixel_y = 'Pixel_y_1920-1930.jpg'
-    output = 'zOutput_1920-1930.png'
-    scale = 1.0
-
-
-elif img == '1925-1930':
-    image_name = '1925-1930.jpg'
-    features = 'feature_points_with_annotations.csv'
-    camera_locations = 'potential_camera_locations.csv'
-    pixel_x = 'Pixel_x_1925-1930.jpg'
-    pixel_y = 'Pixel_y_1925-1930.jpg'
-    output = 'zOutput_1925-1930.png'
-    scale = 1.0
-
-
-elif img == '1930':
-    image_name = '1930.jpg'
-    features = 'feature_points_with_annotations.csv'
-    camera_locations = 'potential_camera_locations.csv'
-    pixel_x = 'Pixel_x_1930.jpg'
-    pixel_y = 'Pixel_y_1930.jpg'
-    output = 'zOutput_1930.png'
-    scale = 1.0
-
-
-elif img == 'center of the settlement kuliang':
-    image_name = 'center of the settlement kuliang.jpg'
-    features = 'feature_points_with_annotations.csv'
-    camera_locations = 'potential_camera_locations.csv'
-    pixel_x = 'Pixel_x_center of the settlement kuliang.jpg'
-    pixel_y = 'Pixel_y_center of the settlement kuliang.jpg'
-    output = 'zOutput_center of the settlement kuliang.png'
-    scale = 1.0
-
-
-elif img == 'kuliang hills':
-    image_name = 'kuliang hills.jpg'
-    features = 'feature_points_with_annotations.csv'
-    camera_locations = 'potential_camera_locations.csv'
-    pixel_x = 'Pixel_x_kuliang hills.jpg'
-    pixel_y = 'Pixel_y_kuliang hills.jpg'
-    output = 'zOutput_kuliang hills.png'
-    scale = 1.0
-
-
-elif img == 'kuliang panorama central segment':
-    image_name = 'kuliang panorama central segment.jpg'
-    features = 'feature_points_with_annotations.csv'
-    camera_locations = 'potential_camera_locations.csv'
-    pixel_x = 'Pixel_x_kuliang panorama central segment.jpg'
-    pixel_y = 'Pixel_y_kuliang panorama central segment.jpg'
-    output = 'zOutput_kuliang panorama central segment.png'
-    scale = 1.0
-
-
-elif img == 'kuliang Pine Crag road':
-    image_name = 'kuliang Pine Crag road.jpg'
-    features = 'feature_points_with_annotations.csv'
-    camera_locations = 'potential_camera_locations.csv'
-    pixel_x = 'Pixel_x_kuliang Pine Crag road.jpg'
-    pixel_y = 'Pixel_y_kuliang Pine Crag road.jpg'
-    output = 'zOutput_kuliang Pine Crag road.png'
-    scale = 1.0
-
-
-elif img == 'Siems Siemssen':
-    image_name = 'Siems Siemssen.jpg'
-    features = 'feature_points_with_annotations.csv'
-    camera_locations = 'potential_camera_locations.csv'
-    pixel_x = 'Pixel_x_Siems Siemssen.jpg'
-    pixel_y = 'Pixel_y_Siems Siemssen.jpg'
-    output = 'zOutput_Siems Siemssen.png'
-    scale = 1.0
-
-
-elif img == 'View Kuliang includes tennis courts':
-    image_name = 'View Kuliang includes tennis courts.jpg'
-    features = 'feature_points_with_annotations.csv'
-    camera_locations = 'potential_camera_locations.csv'
-    pixel_x = 'Pixel_x_View Kuliang includes tennis courts.jpg'
-    pixel_y = 'Pixel_y_View Kuliang includes tennis courts.jpg'
-    output = 'zOutput_View Kuliang includes tennis courts.png'
-    scale = 1.0
-
-
-elif img == 'Worley Family-20':
-    image_name = 'Worley Family-20.jpg'
-    features = 'feature_points_with_annotations.csv'
-    camera_locations = 'potential_camera_locations.csv'
-    pixel_x = 'Pixel_x_Worley Family-20.jpg'
-    pixel_y = 'Pixel_y_Worley Family-20.jpg'
-    output = 'zOutput_Worley Family-20.png'
-    scale = 1.0
-
-
-else:
-    print('No file was selected')
-
-do_it(image_name, features, pixel_x, pixel_y, output, scale, dem_file)
+if __name__ == "__main__":
+    main()
 
 print('**********************')
-# print ('ret: ')
-# print (ret)
-# print ('mtx: ')
-# print (mtx)
-# print ('dist: ')
-# print (dist)
-# print('rvecs: ')
-# print(rvecs)
-# print ('tvecs: ')
-# print(tvecs)
-
 print('Done!')
