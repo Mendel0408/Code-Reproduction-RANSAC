@@ -613,7 +613,7 @@ def pixel_to_ray(pixel_x, pixel_y, K, R, ray_origin):
     return ray_origin, utm_ray
 
 
-def calculate_weights(input_pixel, control_points, max_weight=1, knn_weight=30):
+def calculate_weights(input_pixel, control_points, max_weight=1, knn_weight=10):
     weights = []
     input_pixel = np.array(input_pixel, dtype=np.float64)  # 确保 input_pixel 是浮点数类型
     distances = []
@@ -652,7 +652,7 @@ def compute_optimization_factors(control_points, K, R, ray_origin):
         factor_z = ideal_direction[2] / computed_ray[2]
 
         # 增加异常值检测和过滤
-        if abs(factor_x) > 10 or abs(factor_y) > 10 or abs(factor_z) > 10:
+        if abs(factor_x) > 2 or abs(factor_y) > 2 or abs(factor_z) > 2:
             print(f"【警告】控制点 {cp['symbol']} 的优化因子异常，已过滤: ({factor_x}, {factor_y}, {factor_z})")
             continue
 
@@ -687,7 +687,7 @@ def ray_intersect_dem(ray_origin, ray_direction, dem_data, max_search_dist=10000
         print(f"【DEBUG】DEM海拔: {dem_elev}, 当前高度: {current_pos[2]}")
 
         if step_count >= 120 and current_pos[2] <= dem_elev:
-            return np.array([current_northing, current_easting, current_pos[2]])
+            return np.array([current_easting, current_northing, current_pos[2]])
 
         current_pos[0] += step * ray_direction[0]
         current_pos[1] += step * ray_direction[1]
@@ -697,14 +697,14 @@ def ray_intersect_dem(ray_origin, ray_direction, dem_data, max_search_dist=10000
     return None
 
 # 输入像素坐标，输出地理坐标
-def pixel_to_geo(pixel_coord, K, rotation_vector, translation_vector, ray_origin, dem_interpolator, dem_x, dem_y):
+def pixel_to_geo(pixel_coord, K, rotation_vector, ray_origin, dem_data):
     ray_origin, ray_direction = pixel_to_ray(pixel_coord[0], pixel_coord[1], K, rotation_vector, ray_origin)
 
     # 调试信息
     print(f"【DEBUG】ray_origin 形状: {ray_origin.shape}, ray_origin 值: {ray_origin}")
     print(f"【DEBUG】ray_direction 形状: {ray_direction.shape}, ray_direction 值: {ray_direction}")
 
-    geo_coord = ray_intersect_dem(ray_origin, ray_direction, dem_interpolator, dem_x, dem_y)
+    geo_coord = ray_intersect_dem(ray_origin, ray_direction, dem_data)
     return geo_coord
 
 # **********
@@ -903,8 +903,8 @@ def do_it(image_name, features, pixel_x, pixel_y, output, scale, dem_file):
 
             # 应用最终优化因子校正射线方向
             corrected_ray_direction = np.array([
-                ray_direction[0] * optimized_factors[0],
-                ray_direction[1] * optimized_factors[1],
+                ray_direction[0],
+                ray_direction[1],
                 ray_direction[2] * optimized_factors[2]
             ])
             print(f"【DEBUG】校正前的射线方向分量 (UTM): {corrected_ray_direction}")
