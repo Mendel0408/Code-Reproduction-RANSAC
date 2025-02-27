@@ -656,7 +656,7 @@ def compute_optimization_factors(control_points, K, R, ray_origin):
         factor_z = ideal_direction[2] / computed_ray[2]
 
         # 增加异常值检测和过滤
-        if abs(factor_x) > 10 or abs(factor_y) > 10 or abs(factor_z) > 10:
+        if abs(factor_x) > 2 or abs(factor_y) > 2 or abs(factor_z) > 2:
             print(f"【警告】控制点 {cp['symbol']} 的优化因子异常，已过滤: ({factor_x}, {factor_y}, {factor_z})")
             continue
 
@@ -690,7 +690,7 @@ def ray_intersect_dem(ray_origin, ray_direction, dem_data, max_search_dist=10000
             return None
         logging.debug(f"【DEBUG】DEM海拔: {dem_elev}, 当前高度: {current_pos[2]}")
 
-        if step_count >= 150 and current_pos[2] <= dem_elev:
+        if step_count >= 120 and current_pos[2] <= dem_elev:
             return np.array([current_easting, current_northing, current_pos[2]])
 
         current_pos[0] += step * ray_direction[0]
@@ -1016,8 +1016,8 @@ def do_it(image_name, json_file, features, camera_locations, pixel_x, pixel_y, o
 
             # 应用最终优化因子校正射线方向
             corrected_ray_direction = np.array([
-                ray_direction[0] * optimized_factors[0],
-                ray_direction[1] * optimized_factors[1],
+                ray_direction[0],
+                ray_direction[1],
                 ray_direction[2] * optimized_factors[2]
             ])
             print(f"【DEBUG】校正前的射线方向分量 (UTM): {corrected_ray_direction}")
