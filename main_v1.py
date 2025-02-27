@@ -17,6 +17,7 @@ from scipy.spatial import Delaunay
 from osgeo import gdal
 import json
 import geopandas as gpd
+from shapely.geometry import Polygon
 
 
 # 设置字体
@@ -678,16 +679,16 @@ def ray_intersect_dem(ray_origin, ray_direction, dem_data, max_search_dist=10000
     current_pos = np.array(ray_origin, dtype=np.float64)
     step_count = 0  # 初始化步进计数器
     for _ in range(int(max_search_dist / step)):
-        print(f"【DEBUG】当前UTM坐标: {current_pos}, 当前射线方向: {ray_direction}")
+        logging.debug(f"【DEBUG】当前UTM坐标: {current_pos}, 当前射线方向: {ray_direction}")
         current_easting = current_pos[0]
         current_northing = current_pos[1]
         lon, lat = geo_transformer.utm_to_wgs84(current_easting, current_northing)
         try:
             dem_elev = dem_data['interpolator']((lat, lon))
         except Exception as e:
-            print(f"【错误】插值时出错: {e}")
+            logging.error(f"【错误】插值时出错: {e}")
             return None
-        print(f"【DEBUG】DEM海拔: {dem_elev}, 当前高度: {current_pos[2]}")
+        logging.debug(f"【DEBUG】DEM海拔: {dem_elev}, 当前高度: {current_pos[2]}")
 
         if step_count >= 150 and current_pos[2] <= dem_elev:
             return np.array([current_easting, current_northing, current_pos[2]])
@@ -700,14 +701,10 @@ def ray_intersect_dem(ray_origin, ray_direction, dem_data, max_search_dist=10000
     return None
 
 # 输入像素坐标，输出地理坐标
-def pixel_to_geo(pixel_coord, K, rotation_vector, translation_vector, ray_origin, dem_interpolator, dem_x, dem_y):
+def pixel_to_geo(pixel_coord, K, rotation_vector, translation_vector, ray_origin, dem_data):
     ray_origin, ray_direction = pixel_to_ray(pixel_coord[0], pixel_coord[1], K, rotation_vector, ray_origin)
 
-    # 调试信息
-    print(f"【DEBUG】ray_origin 形状: {ray_origin.shape}, ray_origin 值: {ray_origin}")
-    print(f"【DEBUG】ray_direction 形状: {ray_direction.shape}, ray_direction 值: {ray_direction}")
-
-    geo_coord = ray_intersect_dem(ray_origin, ray_direction, dem_interpolator, dem_x, dem_y)
+    geo_coord = ray_intersect_dem(ray_origin, ray_direction, dem_data)
     return geo_coord
 
 # **********
@@ -798,7 +795,7 @@ def read_boundary_points(json_file):
     return boundary_points
 
 # 将边界像素坐标转换为地理坐标
-def convert_boundary_to_geo(boundary_points, K, R, t, dem_interpolator, dem_x, dem_y):
+def convert_boundary_to_geo(boundary_points, K, R, t, ray_origin, dem_data):
     geo_coords = []
 
     for point in boundary_points:  # ✅ 直接遍历 boundary_points
@@ -806,7 +803,7 @@ def convert_boundary_to_geo(boundary_points, K, R, t, dem_interpolator, dem_x, d
             pixel_x, pixel_y = point  # ✅ 正确解析 (x, y)
             print(f"【DEBUG】转换像素点 ({pixel_x}, {pixel_y})")
 
-            geo_coord = pixel_to_geo([pixel_x, pixel_y], K, R, t, dem_interpolator, dem_x, dem_y)
+            geo_coord = pixel_to_geo([pixel_x, pixel_y], K, R, t, ray_origin, dem_data)
 
             if geo_coord is None:
                 print(f"【WARNING】像素点 ({pixel_x}, {pixel_y}) 转换失败")
@@ -858,7 +855,7 @@ def generate_boundary(geo_coords, alpha=0.1):
 
     # 遍历三角形:
     # ia, ib, ic 是三角形角点的索引
-    for ia, ib, ic in tri.vertices:
+    for ia, ib, ic in tri.simplices:
         pa = points[ia]
         pb = points[ib]
         pc = points[ic]
@@ -881,7 +878,8 @@ def generate_boundary(geo_coords, alpha=0.1):
             add_edge(edges, edge_points, points, ib, ic)
             add_edge(edges, edge_points, points, ic, ia)
 
-    boundary = np.concatenate(edge_points)
+    boundary_points = np.concatenate(edge_points)
+    boundary = Polygon(boundary_points)
     return boundary
 
 # 绘制边界
@@ -1011,6 +1009,7 @@ def do_it(image_name, json_file, features, camera_locations, pixel_x, pixel_y, o
             optimized_factors = weighted_average_optimization_factors(factors, weights)
             print(f"【DEBUG】最终优化因子: {optimized_factors}")
 
+
             ray_origin_utm, ray_direction = pixel_to_ray(input_pixel_x, input_pixel_y, K, R, ray_origin)
             print(f"【DEBUG】ray_origin (UTM) from pixel_to_ray: {ray_origin_utm}")
             print(f"【DEBUG】初始射线方向 (UTM): {ray_direction}")
@@ -1043,7 +1042,7 @@ def do_it(image_name, json_file, features, camera_locations, pixel_x, pixel_y, o
     boundary_points = read_boundary_points(json_file)
 
     # 将边界点转换为地理坐标
-    geo_coords = convert_boundary_to_geo(boundary_points, K, R, t, dem_data['interpolator'], dem_data['x_range'], dem_data['y_range'])
+    geo_coords = convert_boundary_to_geo(boundary_points, K, R, t, ray_origin, dem_data)
     print(f"【DEBUG】dem_data: {dem_data}")
 
     # 使用alphashape生成边界
