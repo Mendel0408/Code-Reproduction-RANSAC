@@ -26,7 +26,6 @@ plt.rcParams['axes.unicode_minus'] = False  # 解决负号 '-' 显示为方块�
 
 # 验证字体是否存在
 font_path = font_manager.findSystemFonts(fontpaths=None, fontext='ttf')
-print("Available fonts:", font_path)
 
 # 设置日志记录
 logging.basicConfig(level=logging.DEBUG, filename='debug.log', filemode='w', format='%(asctime)s - %(levelname)s - %(message)s')
@@ -454,8 +453,8 @@ def find_homography(recs, pixels, pos3ds, symbols, camera_location, im, show, ra
         outliers = np.array([p1 for i in range(pos2[good == 1].shape[0]) if mask[i] == 0])
         plot_ransac_scatter(inliers, outliers)
 
-        print('Output file: ', outputfile)
-        plt.savefig(outputfile, dpi=300)
+        print('Output image file: ', outputfile)
+        plt.savefig(outputfile.replace(".jpg", "_output.png"), dpi=300)
         plt.show()
 
     err2 += np.sum(1 - mask) * ransacbound
@@ -640,7 +639,7 @@ def calculate_weights(input_pixel, control_points, max_weight=1, knn_weight=10):
 
 
 def compute_optimization_factors(control_points, K, R, ray_origin):
-    factors = []
+    optimization_factors = []
     for cp in control_points:
         true_geo = np.array(cp['pos3d'], dtype=np.float64)
         ideal_direction = true_geo - ray_origin
@@ -651,21 +650,21 @@ def compute_optimization_factors(control_points, K, R, ray_origin):
         ideal_direction /= norm_ideal
         _, computed_ray = pixel_to_ray(cp['pixel'][0], cp['pixel'][1], K, R, ray_origin)
         computed_ray /= np.linalg.norm(computed_ray)
-        factor_x = ideal_direction[0] / computed_ray[0]
-        factor_y = ideal_direction[1] / computed_ray[1]
-        factor_z = ideal_direction[2] / computed_ray[2]
+        optimization_factor_x = ideal_direction[0] / computed_ray[0]
+        optimization_factor_y = ideal_direction[1] / computed_ray[1]
+        optimization_factor_z = ideal_direction[2] / computed_ray[2]
 
         # 增加异常值检测和过滤
-        if abs(factor_x) > 2 or abs(factor_y) > 2 or abs(factor_z) > 2:
-            print(f"【警告】控制点 {cp['symbol']} 的优化因子异常，已过滤: ({factor_x}, {factor_y}, {factor_z})")
+        if abs(optimization_factor_x) > 2 or abs(optimization_factor_y) > 2 or abs(optimization_factor_z) > 2:
+            print(f"【警告】控制点 {cp['symbol']} 的优化因子异常，已过滤: ({optimization_factor_x}, {optimization_factor_y}, {optimization_factor_z})")
             continue
 
-        factors.append((factor_x, factor_y, factor_z))
-        cp['factors'] = (factor_x, factor_y, factor_z)  # 保存优化因子到控制点
+        optimization_factors.append((optimization_factor_x, optimization_factor_y, optimization_factor_z))
+        cp['factors'] = (optimization_factor_x, optimization_factor_y, optimization_factor_z)  # 保存优化因子到控制点
         print(f"【DEBUG】控制点 {cp['symbol']} 的理想UTM射线方向: {ideal_direction}")
         print(f"【DEBUG】UTM 坐标系下的射线方向 (R.T转换后): {computed_ray}")
-        print(f"【DEBUG】控制点 {cp['symbol']} 的优化因子: ({factor_x}, {factor_y}, {factor_z})")
-    return factors
+        print(f"【DEBUG】控制点 {cp['symbol']} 的优化因子: ({optimization_factor_x}, {optimization_factor_y}, {optimization_factor_z})")
+    return optimization_factors
 
 def weighted_average_optimization_factors(factors, weights):
     # 将权重归一化
@@ -701,10 +700,20 @@ def ray_intersect_dem(ray_origin, ray_direction, dem_data, max_search_dist=10000
     return None
 
 # 输入像素坐标，输出地理坐标
-def pixel_to_geo(pixel_coord, K, rotation_vector, translation_vector, ray_origin, dem_data):
-    ray_origin, ray_direction = pixel_to_ray(pixel_coord[0], pixel_coord[1], K, rotation_vector, ray_origin)
-
+def pixel_to_geo(pixel_coord, K, R, ray_origin, dem_data, control_points, optimization_factors):
+    # 计算权重
+    weights = calculate_weights(pixel_coord, control_points)
+    # 计算加权优化因子
+    weighted_optimization_factors = weighted_average_optimization_factors(optimization_factors, weights)
+    # 计算射线方向
+    ray_origin, ray_direction = pixel_to_ray(pixel_coord[0], pixel_coord[1], K, R, ray_origin)
+    # 应用优化因子校正射线方向的Z分量
+    ray_direction[2] *= weighted_optimization_factors[2]
+    # 归一化校正后的射线方向
+    ray_direction = ray_direction / np.linalg.norm(ray_direction)
+    # 计算射线与DEM的交点
     geo_coord = ray_intersect_dem(ray_origin, ray_direction, dem_data)
+
     return geo_coord
 
 # **********
@@ -795,22 +804,29 @@ def read_boundary_points(json_file):
     return boundary_points
 
 # 将边界像素坐标转换为地理坐标
-def convert_boundary_to_geo(boundary_points, K, R, t, ray_origin, dem_data):
+def convert_boundary_to_geo(boundary_points, K, R, ray_origin, dem_data, control_points, optimization_factors):
     geo_coords = []
+    objectid = 1  # 初始化objectid
 
-    for point in boundary_points:  # ✅ 直接遍历 boundary_points
-        if isinstance(point, list) and len(point) == 2:
-            pixel_x, pixel_y = point  # ✅ 正确解析 (x, y)
-            print(f"【DEBUG】转换像素点 ({pixel_x}, {pixel_y})")
+    with open('space_boundary_geo_coord.csv', 'w', newline='', encoding='utf-8') as csvfile:
+        csv_writer = csv.writer(csvfile)
+        csv_writer.writerow(['objectid', 'Pixel_x', 'Pixel_y', 'Easting', 'Northing', 'Elevation'])
 
-            geo_coord = pixel_to_geo([pixel_x, pixel_y], K, R, t, ray_origin, dem_data)
+        for point in boundary_points:
+            if isinstance(point, list) and len(point) == 2:
+                pixel_x, pixel_y = point
+                print(f"【DEBUG】转换像素点 ({pixel_x}, {pixel_y})")
 
-            if geo_coord is None:
-                print(f"【WARNING】像素点 ({pixel_x}, {pixel_y}) 转换失败")
+                geo_coord = pixel_to_geo([pixel_x, pixel_y], K, R, ray_origin, dem_data, control_points, optimization_factors)
+
+                if geo_coord is None:
+                    print(f"【WARNING】像素点 ({pixel_x}, {pixel_y}) 转换失败")
+                else:
+                    geo_coords.append(geo_coord)
+                    csv_writer.writerow([objectid, pixel_x, pixel_y, geo_coord[0], geo_coord[1], geo_coord[2]])
+                    objectid += 1
             else:
-                geo_coords.append(geo_coord)
-        else:
-            print(f"【WARNING】无效的边界点: {point}")
+                print(f"【WARNING】无效的边界点: {point}")
 
     print(f"【DEBUG】成功转换 {len(geo_coords)} 个地理坐标: {geo_coords}")
 
@@ -818,83 +834,6 @@ def convert_boundary_to_geo(boundary_points, K, R, t, ray_origin, dem_data):
         raise ValueError("所有边界点转换失败，geo_coords 为空")
 
     return geo_coords
-
-
-# 使用alphashape生成边界
-def generate_boundary(geo_coords, alpha=0.1):
-    """
-    使用 alpha 形状算法生成边界。
-
-    参数:
-    - geo_coords: 地理坐标列表 (x, y, z)。
-    - alpha: alpha 形状算法的 alpha 值。
-
-    返回:
-    - boundary: 边界点列表。
-    """
-    # 确保 geo_coords 是二维数组
-    geo_coords = np.array(geo_coords)
-    if geo_coords.size == 0:
-        raise ValueError("geo_coords 数组为空，无法生成边界")
-    if geo_coords.ndim == 1:
-        geo_coords = np.expand_dims(geo_coords, axis=0)
-
-    # 使用二维坐标 (x, y)
-    points = geo_coords[:, :2]
-
-    tri = Delaunay(points)
-    edges = set()
-    edge_points = []
-
-    def add_edge(edges, edge_points, coords, i, j):
-        """ 如果边 (i, j) 不在列表中，则添加线段 """
-        if (i, j) in edges or (j, i) in edges:
-            return
-        edges.add((i, j))
-        edge_points.append(coords[ [i, j] ])
-
-    # 遍历三角形:
-    # ia, ib, ic 是三角形角点的索引
-    for ia, ib, ic in tri.simplices:
-        pa = points[ia]
-        pb = points[ib]
-        pc = points[ic]
-
-        # 三角形边的长度
-        a = np.linalg.norm(pa - pb)
-        b = np.linalg.norm(pb - pc)
-        c = np.linalg.norm(pc - pa)
-
-        # 三角形的半周长
-        s = (a + b + c) / 2.0
-
-        # 用海伦公式计算三角形的面积
-        area = np.sqrt(s * (s - a) * (s - b) * (s - c))
-        circum_r = a * b * c / (4.0 * area)
-
-        # 这里是半径过滤器。
-        if circum_r < 1.0 / alpha:
-            add_edge(edges, edge_points, points, ia, ib)
-            add_edge(edges, edge_points, points, ib, ic)
-            add_edge(edges, edge_points, points, ic, ia)
-
-    boundary_points = np.concatenate(edge_points)
-    boundary = Polygon(boundary_points)
-    return boundary
-
-# 绘制边界
-def plot_boundary(alpha_shape):
-    fig, ax = plt.subplots(figsize=(10, 6))
-    ax.plot(*alpha_shape.exterior.xy, marker='o')
-    plt.title('Boundary Region')
-    plt.xlabel('Easting')
-    plt.ylabel('Northing')
-    plt.show()
-
-# 保存边界为shapefile
-def save_boundary_as_shapefile(alpha_shape, output_shapefile):
-    gdf = gpd.GeoDataFrame(index=[0], crs='EPSG:32650', geometry=[alpha_shape])  # UTM Zone 50N
-    gdf.to_file(output_shapefile)
 
 
 # **********
@@ -988,7 +927,7 @@ def do_it(image_name, json_file, features, camera_locations, pixel_x, pixel_y, o
         return
 
     # 计算每个控制点的优化因子
-    factors = compute_optimization_factors(control_points, K, R, ray_origin)
+    optimization_factors = compute_optimization_factors(control_points, K, R, ray_origin)
 
     while True:
         try:
@@ -1005,27 +944,8 @@ def do_it(image_name, json_file, features, camera_locations, pixel_x, pixel_y, o
             print(f"【DEBUG】转换为浮点数: x={input_pixel_x}, y={input_pixel_y}")
 
             input_pixel = [input_pixel_x, input_pixel_y]  # 使用输入的像素坐标
-            weights = calculate_weights(input_pixel, control_points)
-            optimized_factors = weighted_average_optimization_factors(factors, weights)
-            print(f"【DEBUG】最终优化因子: {optimized_factors}")
 
-
-            ray_origin_utm, ray_direction = pixel_to_ray(input_pixel_x, input_pixel_y, K, R, ray_origin)
-            print(f"【DEBUG】ray_origin (UTM) from pixel_to_ray: {ray_origin_utm}")
-            print(f"【DEBUG】初始射线方向 (UTM): {ray_direction}")
-
-            # 应用最终优化因子校正射线方向
-            corrected_ray_direction = np.array([
-                ray_direction[0],
-                ray_direction[1],
-                ray_direction[2] * optimized_factors[2]
-            ])
-            print(f"【DEBUG】校正前的射线方向分量 (UTM): {corrected_ray_direction}")
-
-            corrected_ray_direction /= np.linalg.norm(corrected_ray_direction)
-            print(f"【DEBUG】标准化后的校正射线方向 (UTM): {corrected_ray_direction}")
-
-            geo_coord = ray_intersect_dem(ray_origin_utm, corrected_ray_direction, dem_data)
+            geo_coord = pixel_to_geo(input_pixel, K, R, ray_origin, dem_data, control_points, optimization_factors)
             if geo_coord is not None:
                 print(f"像素坐标 ({input_pixel_x}, {input_pixel_y}) 对应的UTM地理坐标:")
                 print(f"Easting: {geo_coord[0]:.2f}, Northing: {geo_coord[1]:.2f}, 高度: {geo_coord[2]:.2f}")
@@ -1042,19 +962,8 @@ def do_it(image_name, json_file, features, camera_locations, pixel_x, pixel_y, o
     boundary_points = read_boundary_points(json_file)
 
     # 将边界点转换为地理坐标
-    geo_coords = convert_boundary_to_geo(boundary_points, K, R, t, ray_origin, dem_data)
-    print(f"【DEBUG】dem_data: {dem_data}")
+    geo_coords = convert_boundary_to_geo(boundary_points, K, R, ray_origin, dem_data, control_points, optimization_factors)
 
-    # 使用alphashape生成边界
-    alpha_shape = generate_boundary(geo_coords, alpha=0.1)
-
-    # 绘制边界区域
-    plot_boundary(alpha_shape)
-
-    # 将边界保存为Shapefile
-    save_boundary_as_shapefile(alpha_shape, output)
-
-    print('Boundary region saved as shapefile:', output)
 
 # 主函数处理多个图像
 def main():
