@@ -705,14 +705,23 @@ def pixel_to_geo(pixel_coord, K, R, ray_origin, dem_data, control_points, optimi
     weights = calculate_weights(pixel_coord, control_points)
     # 计算加权优化因子
     weighted_optimization_factors = weighted_average_optimization_factors(optimization_factors, weights)
+    print(f"【DEBUG】加权优化因子: {weighted_optimization_factors}")
     # 计算射线方向
     ray_origin, ray_direction = pixel_to_ray(pixel_coord[0], pixel_coord[1], K, R, ray_origin)
+    print(f"【DEBUG】初始射线方向: {ray_direction}")
     # 应用优化因子校正射线方向的Z分量
-    ray_direction[2] *= weighted_optimization_factors[2]
+    optimized_ray_direction = np.array([
+        ray_direction[0],
+        ray_direction[1],
+        ray_direction[2] * weighted_optimization_factors[2]
+    ])
+    print(f"【DEBUG】优化射线方向: {optimized_ray_direction}")
     # 归一化校正后的射线方向
-    ray_direction = ray_direction / np.linalg.norm(ray_direction)
+    final_ray_direction = optimized_ray_direction / np.linalg.norm(optimized_ray_direction)
+    print(f"【DEBUG】最终射线方向: {final_ray_direction}")
     # 计算射线与DEM的交点
-    geo_coord = ray_intersect_dem(ray_origin, ray_direction, dem_data)
+    geo_coord = ray_intersect_dem(ray_origin, final_ray_direction, dem_data)
+    print(f"【DEBUG】地理坐标: {geo_coord}")
 
     return geo_coord
 
