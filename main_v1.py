@@ -821,21 +821,23 @@ def convert_boundary_to_geo(json_data, K, R, ray_origin, dem_data, control_point
             geo_coord = pixel_to_geo([pixel_x, pixel_y], K, R, ray_origin, dem_data, control_points,
                                      optimization_factors)
             if geo_coord.all():
-                boundary_geo_coords[key].append((pixel_x, pixel_y, geo_coord))
+                boundary_geo_coords[key].append(geo_coord)
 
     return boundary_geo_coords
+
 # 生成csv
 def save_boundary_to_csv(boundary_geo_coords, csv_file='boundary_points_geo.csv'):
     csv_data = []
 
     for (group, category), coords in boundary_geo_coords.items():
-        for pixel_x, pixel_y, coord in coords:
-            csv_data.append([category, group, pixel_x, pixel_y, coord[0], coord[1], coord[2]])
+        for coord in coords:
+            csv_data.append([category, group, coord[0], coord[1], coord[2]])
 
     with open(csv_file, 'w', newline='', encoding='utf-8') as f:
         writer = csv.writer(f)
-        writer.writerow(['category', 'group', 'pixel_x', 'pixel_y', 'geo_x', 'geo_y', 'geo_z'])
+        writer.writerow(['category', 'group', 'geo_x', 'geo_y', 'geo_z'])
         writer.writerows(csv_data)
+
     print(f"CSV文件已保存到 {csv_file}")
 
 # 生成shp
@@ -844,20 +846,22 @@ def save_boundary_to_shapefiles(boundary_geo_coords, json_data, output_dir):
 
     for (group, category), group_coords in boundary_geo_coords.items():
         if len(group_coords) < 3:
-            logging.warning(f"Group {group}, Category {category} 边界点数量少于3个，生成Polygon失败")
+            print(f"Group {group}, Category {category} 边界点数量少于3个，生成Polygon失败")
             continue
 
         attributes = []
         geometry = []
 
-        polygon = Polygon([coord[2] for coord in group_coords])
+        polygon = Polygon(group_coords)
         geometry.append(polygon)
         attributes.append({
             'group': group,
             'name': name,
             'category': category,
             'area': polygon.area,
-            'perimeter': polygon.length
+            'perimeter': polygon.length,
+            'easting': polygon.centroid.x,
+            'northing': polygon.centroid.y
         })
 
         gdf = gpd.GeoDataFrame(attributes, geometry=geometry)
@@ -872,7 +876,7 @@ def save_boundary_to_shapefiles(boundary_geo_coords, json_data, output_dir):
 def generate_mask_and_extract_pixels(image_name, boundary_points):
     # 指定图像路径
     image_path = os.path.join("historical photos", image_name)
-    logging.debug(f"Trying to open image: {image_path}")
+    print(f"Trying to open image: {image_path}")
 
     # 读取图像
     image = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE)
@@ -895,7 +899,7 @@ def generate_mask_and_extract_pixels(image_name, boundary_points):
 def sample_points(points, sample_size):
     # 均匀采样
     sampled_points = points[np.random.choice(points.shape[0], sample_size, replace=False)]
-    print(f"采样后的区域像素坐标数量: {sampled_points.shape[0]}")
+    print(f"采样后的区域像素坐标数量：{sampled_points.shape[0]}")
     return sampled_points
 
 def plot_sampled_and_boundary_points(image, sampled_points, boundary_points):
@@ -908,13 +912,31 @@ def plot_sampled_and_boundary_points(image, sampled_points, boundary_points):
     plt.title("Sampled Points and Boundary Points on Image")
     plt.show()
 
-def region_to_geo(sampled_points, K, R, ray_origin, dem_data, control_points, optimization_factors):
-    region_geo_coords = []
+def region_to_geo(json_data, K, R, ray_origin, dem_data, control_points, optimization_factors, image_name,
+                  sample_size=1000):
+    region_geo_coords = {}
 
-    for pixel_y, pixel_x in sampled_points:
-        geo_coord = pixel_to_geo([pixel_x, pixel_y], K, R, ray_origin, dem_data, control_points, optimization_factors)
-        if geo_coord.size == 3:
-            region_geo_coords.append(geo_coord)
+    for obj in json_data['objects']:
+        group = obj['group']
+        category = re.sub(r'[^a-zA-Z0-9]', '', obj['category'])
+        key = (group, category)
+
+        if key not in region_geo_coords:
+            region_geo_coords[key] = []
+
+        boundary_points = obj['segmentation']
+        region_pixels = generate_mask_and_extract_pixels(image_name, boundary_points)
+
+        if region_pixels is None:
+            continue
+
+        sampled_points = sample_points(region_pixels, sample_size)
+
+        for pixel_y, pixel_x in sampled_points:
+            geo_coord = pixel_to_geo([pixel_x, pixel_y], K, R, ray_origin, dem_data, control_points,
+                                     optimization_factors)
+            if geo_coord.all():
+                region_geo_coords[key].append(geo_coord)
 
     return region_geo_coords
 
@@ -926,12 +948,9 @@ def visualize_3d(region_geo_coords):
     # 定义颜色映射
     colors = plt.cm.get_cmap('tab20', len(region_geo_coords))
 
-    for idx, points in enumerate(region_geo_coords):
+    for idx, ((group, category), points) in enumerate(region_geo_coords.items()):
         points = np.array(points)
-        if points.shape[1] < 3:
-            logging.error(f"Points array does not have enough dimensions: {points.shape}")
-            continue
-        ax.scatter(points[:, 0], points[:, 1], points[:, 2], c=[colors(idx)], label=f"Category_{idx}")
+        ax.scatter(points[:, 0], points[:, 1], points[:, 2], c=[colors(idx)], label=f"{category}_{group}")
 
     ax.legend()
     plt.show()
@@ -1077,7 +1096,7 @@ def do_it(image_name, json_file, features, camera_locations, pixel_x, pixel_y, o
     plot_sampled_and_boundary_points(im, sampled_points, boundary_points)
 
     # 三维重建可视化
-    region_geo_coords = region_to_geo(sampled_points, K, R, ray_origin, dem_data, control_points, optimization_factors)
+    region_geo_coords = region_to_geo(json_data, K, R, ray_origin, dem_data, control_points, optimization_factors, image_name, sample_size)
     visualize_3d(region_geo_coords)
 
     # 将边界点转换为地理坐标
@@ -1088,7 +1107,6 @@ def do_it(image_name, json_file, features, camera_locations, pixel_x, pixel_y, o
 
     # 保存为Shapefile
     save_boundary_to_shapefiles(boundary_geo_coords, json_data, "output_shapefiles")
-
 
 # 主函数处理多个图像
 def main():
