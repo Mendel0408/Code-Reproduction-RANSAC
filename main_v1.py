@@ -18,6 +18,8 @@ from osgeo import gdal
 import json
 import geopandas as gpd
 from shapely.geometry import Polygon
+import os
+import re
 
 
 # 设置字体
@@ -512,8 +514,7 @@ def estimate_camera_pose(pos3d, pixels, K):
     K = np.asarray(K, dtype=np.float64).reshape(3, 3)
     dist_coeffs = np.zeros((4, 1), dtype=np.float64)
 
-    print("3D points:\n", pos3d)
-    print("2D points:\n", pixels)
+
     print("Camera matrix K:\n", K)
 
     # 可视化3D点
@@ -633,7 +634,7 @@ def calculate_weights(input_pixel, control_points, max_weight=1, knn_weight=10):
 
     # 输出每个控制点的距离和权重信息
     for i, cp in enumerate(control_points):
-        print(f"【DEBUG】控制点 {cp['symbol']} 的距离: {distances[i]}, 权重: {weights[i]}")
+        logging.debug(f"【DEBUG】控制点 {cp['symbol']} 的距离: {distances[i]}, 权重: {weights[i]}")
 
     return np.array(weights)
 
@@ -662,7 +663,7 @@ def compute_optimization_factors(control_points, K, R, ray_origin):
         optimization_factors.append((optimization_factor_x, optimization_factor_y, optimization_factor_z))
         cp['factors'] = (optimization_factor_x, optimization_factor_y, optimization_factor_z)  # 保存优化因子到控制点
         print(f"【DEBUG】控制点 {cp['symbol']} 的理想UTM射线方向: {ideal_direction}")
-        print(f"【DEBUG】UTM 坐标系下的射线方向 (R.T转换后): {computed_ray}")
+        print(f"【DEBUG】像素射线方向: {computed_ray}")
         print(f"【DEBUG】控制点 {cp['symbol']} 的优化因子: ({optimization_factor_x}, {optimization_factor_y}, {optimization_factor_z})")
     return optimization_factors
 
@@ -803,53 +804,153 @@ def read_camera_locations(camera_locations):
         logging.debug(f'Processed {line_count} lines.')
         return recs
 
-# 从JSON文件中读取边界点
-def read_boundary_points(json_file):
-    with open(json_file, 'r', encoding='utf-8') as f:
-        data = json.load(f)
-
-    boundary_points = data['objects'][0]['segmentation']  # 读取所有边界点
-    print(f"【DEBUG】boundary_points: {boundary_points}")
-    return boundary_points
-
 # 将边界像素坐标转换为地理坐标
-def convert_boundary_to_geo(boundary_points, K, R, ray_origin, dem_data, control_points, optimization_factors):
-    geo_coords = []
-    objectid = 1  # 初始化objectid
+def convert_boundary_to_geo(json_data, K, R, ray_origin, dem_data, control_points, optimization_factors):
+    boundary_geo_coords = {}
 
-    with open('space_boundary_geo_coord.csv', 'w', newline='', encoding='utf-8') as csvfile:
-        csv_writer = csv.writer(csvfile)
-        csv_writer.writerow(['objectid', 'Pixel_x', 'Pixel_y', 'Easting', 'Northing', 'Elevation'])
+    for obj in json_data['objects']:
+        group = obj['group']
+        category = re.sub(r'[^a-zA-Z0-9]', '', obj['category'])
+        key = (group, category)
 
-        for point in boundary_points:
-            if isinstance(point, list) and len(point) == 2:
-                pixel_x, pixel_y = point
-                print(f"【DEBUG】转换像素点 ({pixel_x}, {pixel_y})")
+        if key not in boundary_geo_coords:
+            boundary_geo_coords[key] = []
 
-                geo_coord = pixel_to_geo([pixel_x, pixel_y], K, R, ray_origin, dem_data, control_points, optimization_factors)
+        boundary_points = obj['segmentation']
+        for pixel_x, pixel_y in boundary_points:
+            geo_coord = pixel_to_geo([pixel_x, pixel_y], K, R, ray_origin, dem_data, control_points,
+                                     optimization_factors)
+            if geo_coord.all():
+                boundary_geo_coords[key].append((pixel_x, pixel_y, geo_coord))
 
-                if geo_coord is None:
-                    print(f"【WARNING】像素点 ({pixel_x}, {pixel_y}) 转换失败")
-                else:
-                    geo_coords.append(geo_coord)
-                    csv_writer.writerow([objectid, pixel_x, pixel_y, geo_coord[0], geo_coord[1], geo_coord[2]])
-                    objectid += 1
-            else:
-                print(f"【WARNING】无效的边界点: {point}")
+    return boundary_geo_coords
+# 生成csv
+def save_boundary_to_csv(boundary_geo_coords, csv_file='boundary_points_geo.csv'):
+    csv_data = []
 
-    print(f"【DEBUG】成功转换 {len(geo_coords)} 个地理坐标: {geo_coords}")
+    for (group, category), coords in boundary_geo_coords.items():
+        for pixel_x, pixel_y, coord in coords:
+            csv_data.append([category, group, pixel_x, pixel_y, coord[0], coord[1], coord[2]])
 
-    if not geo_coords:
-        raise ValueError("所有边界点转换失败，geo_coords 为空")
+    with open(csv_file, 'w', newline='', encoding='utf-8') as f:
+        writer = csv.writer(f)
+        writer.writerow(['category', 'group', 'pixel_x', 'pixel_y', 'geo_x', 'geo_y', 'geo_z'])
+        writer.writerows(csv_data)
+    print(f"CSV文件已保存到 {csv_file}")
 
-    return geo_coords
+# 生成shp
+def save_boundary_to_shapefiles(boundary_geo_coords, json_data, output_dir):
+    name = json_data['info']['name']
 
+    for (group, category), group_coords in boundary_geo_coords.items():
+        if len(group_coords) < 3:
+            logging.warning(f"Group {group}, Category {category} 边界点数量少于3个，生成Polygon失败")
+            continue
+
+        attributes = []
+        geometry = []
+
+        polygon = Polygon([coord[2] for coord in group_coords])
+        geometry.append(polygon)
+        attributes.append({
+            'group': group,
+            'name': name,
+            'category': category,
+            'area': polygon.area,
+            'perimeter': polygon.length
+        })
+
+        gdf = gpd.GeoDataFrame(attributes, geometry=geometry)
+        gdf.set_crs(epsg=32650, inplace=True)
+
+        sanitized_category = re.sub(r'[^a-zA-Z0-9]', '', category)
+        output_shp_file = os.path.join(output_dir, f"{sanitized_category}_{group}_boundary.shp")
+        gdf.to_file(output_shp_file, driver='ESRI Shapefile')
+        print(f"Shapefile已保存到 {output_shp_file}")
+
+# 创建掩码并提取区域内像素坐标
+def generate_mask_and_extract_pixels(image_name, boundary_points):
+    # 指定图像路径
+    image_path = os.path.join("historical photos", image_name)
+    logging.debug(f"Trying to open image: {image_path}")
+
+    # 读取图像
+    image = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE)
+    if image is None:
+        raise FileNotFoundError(f"Image not found: {image_path}")
+
+    # 创建掩码
+    mask = np.zeros_like(image, dtype=np.uint8)
+    boundary_points = np.array(boundary_points, dtype=np.int32)
+    cv2.fillPoly(mask, [boundary_points], 255)
+
+    # 获取区域内的所有像素点坐标
+    region_pixels = np.argwhere(mask == 255)
+
+    if region_pixels.size == 0:
+        return None
+
+    return region_pixels
+
+def sample_points(points, sample_size):
+    # 均匀采样
+    sampled_points = points[np.random.choice(points.shape[0], sample_size, replace=False)]
+    print(f"采样后的区域像素坐标数量: {sampled_points.shape[0]}")
+    return sampled_points
+
+def plot_sampled_and_boundary_points(image, sampled_points, boundary_points):
+    # 重绘采样点和边界点在照片上
+    plt.figure(figsize=(11.69, 8.27))
+    plt.imshow(image, cmap='gray')
+    plt.scatter(sampled_points[:, 1], sampled_points[:, 0], s=1, color='red', label='Sampled Points')
+    plt.scatter(boundary_points[:, 1], boundary_points[:, 0], s=1, color='blue', label='Boundary Points')
+    plt.legend()
+    plt.title("Sampled Points and Boundary Points on Image")
+    plt.show()
+
+def region_to_geo(sampled_points, K, R, ray_origin, dem_data, control_points, optimization_factors):
+    region_geo_coords = []
+
+    for pixel_y, pixel_x in sampled_points:
+        geo_coord = pixel_to_geo([pixel_x, pixel_y], K, R, ray_origin, dem_data, control_points, optimization_factors)
+        if geo_coord.size == 3:
+            region_geo_coords.append(geo_coord)
+
+    return region_geo_coords
+
+# 可视化三维重建
+def visualize_3d(region_geo_coords):
+    fig = plt.figure()
+    ax = fig.add_subplot(111, projection='3d')
+
+    # 定义颜色映射
+    colors = plt.cm.get_cmap('tab20', len(region_geo_coords))
+
+    for idx, points in enumerate(region_geo_coords):
+        points = np.array(points)
+        if points.shape[1] < 3:
+            logging.error(f"Points array does not have enough dimensions: {points.shape}")
+            continue
+        ax.scatter(points[:, 0], points[:, 1], points[:, 2], c=[colors(idx)], label=f"Category_{idx}")
+
+    ax.legend()
+    plt.show()
 
 # **********
 # Main function
 # **********
-def do_it(image_name, json_file, features, camera_locations, pixel_x, pixel_y, output, scale, dem_file):
-    im = cv2.imread(image_name)
+def do_it(image_name, json_file, features, camera_locations, pixel_x, pixel_y, output, scale, dem_file,
+          sample_size=1000):
+    # 确保工作目录为脚本所在目录
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    os.chdir(script_dir)
+
+    # 检查图像文件是否存在
+    image_path = os.path.join("historical photos", image_name)
+    if not os.path.exists(image_path):
+        raise FileNotFoundError(f"Image not found: {image_path}")
+
+    im = cv2.imread(image_path)
     im2 = np.copy(im)
     im[:, :, 0] = im2[:, :, 2]
     im[:, :, 1] = im2[:, :, 1]
@@ -870,14 +971,14 @@ def do_it(image_name, json_file, features, camera_locations, pixel_x, pixel_y, o
     num_matches2[num_matches2 == 0] = 1000000
     print(np.min(num_matches2))
     theloci = np.argmin(num_matches2)
-    print(f"【DEBUG】最佳相机位置 (UTM): {locations[theloci]['pos3d']}")
+    print(f"【DEBUG】推测相机位置: {locations[theloci]['pos3d']}")
 
     # 设置 K 矩阵
     width, height = im.shape[1], im.shape[0]
     cx = 9.82666819e+02
     cy = 6.97950868e+02
     # 相机物理参数（单位：mm）
-    focal_length_mm = 240.0  # 焦距 150mm
+    focal_length_mm = 240.0  # 焦距 240mm
     sensor_width_mm = 127.0  # 传感器宽度 127mm
     sensor_height_mm = 178.0  # 传感器高度 178mm
     # 根据物理参数将焦距换算为像素单位：
@@ -887,7 +988,6 @@ def do_it(image_name, json_file, features, camera_locations, pixel_x, pixel_y, o
     K = np.array([[fx, 0, cx],
                   [0, fy, cy],
                   [0, 0, 1]], dtype=np.float64)
-    print(f"【DEBUG】K 矩阵: \n{K}")
 
     # 加载DEM数据（DEM范围为UTM）
     dem_data = load_dem_data(dem_file)
@@ -917,13 +1017,13 @@ def do_it(image_name, json_file, features, camera_locations, pixel_x, pixel_y, o
     camera_origin = -R.T @ t.flatten()
     print(f"【DEBUG】PnP求解的相机位置 (UTM): {camera_origin}")
 
+    # 修正相机位置海拔
     dem_elev = get_dem_elevation(dem_data, camera_origin[0], camera_origin[1])
     corrected_camera_origin = np.array([camera_origin[0], camera_origin[1], dem_elev + 1.5])
-    print(f"【DEBUG】修正后的相机位置 (UTM): {corrected_camera_origin}")
 
     # 直接使用修正后的camera_origin作为ray_origin
     ray_origin = corrected_camera_origin
-    print(f"【DEBUG】用于射线计算的 ray_origin (UTM): {ray_origin}")
+    print(f"【DEBUG】用于射线方向计算的相机位置: {ray_origin}")
 
     # 校验相机位置是否在 DEM 的 UTM 覆盖范围内，直接使用 dem_data 中的 utm_x_range 和 utm_y_range
     tol = 1e-5
@@ -950,8 +1050,6 @@ def do_it(image_name, json_file, features, camera_locations, pixel_x, pixel_y, o
                 continue
 
             input_pixel_x, input_pixel_y = map(float, pixel_values)
-            print(f"【DEBUG】转换为浮点数: x={input_pixel_x}, y={input_pixel_y}")
-
             input_pixel = [input_pixel_x, input_pixel_y]  # 使用输入的像素坐标
 
             geo_coord = pixel_to_geo(input_pixel, K, R, ray_origin, dem_data, control_points, optimization_factors)
@@ -966,12 +1064,30 @@ def do_it(image_name, json_file, features, camera_locations, pixel_x, pixel_y, o
         except Exception as e:
             print(f"发生未知错误: {e}")
 
+    # 读取JSON文件
+    with open(json_file, 'r', encoding='utf-8') as f:
+        json_data = json.load(f)
 
-    # 读取JSON文件中的边界点
-    boundary_points = read_boundary_points(json_file)
+    # 生成并采样区域像素坐标
+    boundary_points = np.array([point for obj in json_data['objects'] for point in obj['segmentation']])
+    region_pixels = generate_mask_and_extract_pixels(image_name, boundary_points)
+    sampled_points = sample_points(region_pixels, sample_size)
+
+    # 调用重绘函数
+    plot_sampled_and_boundary_points(im, sampled_points, boundary_points)
+
+    # 三维重建可视化
+    region_geo_coords = region_to_geo(sampled_points, K, R, ray_origin, dem_data, control_points, optimization_factors)
+    visualize_3d(region_geo_coords)
 
     # 将边界点转换为地理坐标
-    geo_coords = convert_boundary_to_geo(boundary_points, K, R, ray_origin, dem_data, control_points, optimization_factors)
+    boundary_geo_coords = convert_boundary_to_geo(json_data, K, R, ray_origin, dem_data, control_points, optimization_factors)
+
+    # 保存为csv
+    save_boundary_to_csv(boundary_geo_coords)
+
+    # 保存为Shapefile
+    save_boundary_to_shapefiles(boundary_geo_coords, json_data, "output_shapefiles")
 
 
 # 主函数处理多个图像
