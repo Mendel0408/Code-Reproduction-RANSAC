@@ -20,7 +20,7 @@ import geopandas as gpd
 from shapely.geometry import Polygon
 import os
 import re
-
+import random
 
 # 设置字体
 plt.rcParams['font.sans-serif'] = ['SimHei']  # 使用黑体
@@ -247,49 +247,6 @@ def calc_bearing(x1, y1, x2, y2):
             degrees_final = 360 + 180 - degrees_final
 
     return degrees_final
-
-
-# **********
-# Camera calibration process
-# **********
-def calibrate_camera(size):
-    CHECKERBOARD = (6, 9)
-    criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, size, 0.001)  # was 30
-
-    objpoints = []  # Creating vector to store vectors of 3D points for each checkerboard image
-    imgpoints = []  # Creating vector to store vectors of 2D points for each checkerboard image
-
-    # Defining the world coordinates for 3D points
-    objp = np.zeros((1, CHECKERBOARD[0] * CHECKERBOARD[1], 3), np.float32)
-    objp[0, :, :2] = np.mgrid[0:CHECKERBOARD[0], 0:CHECKERBOARD[1]].T.reshape(-1, 2)
-    prev_img_shape = None
-
-    images = glob.glob(
-        r'.\camera_calibration\images\*.jpg')  # TODO: change the path according to the path in your environmrnt
-    for fname in images:
-        img = cv2.imread(fname)
-        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-        # Find the chess board corners
-        # If desired number of corners are found in the image then ret = true
-        ret, corners = cv2.findChessboardCorners(gray, CHECKERBOARD,
-                                                 cv2.CALIB_CB_ADAPTIVE_THRESH + cv2.CALIB_CB_FAST_CHECK + cv2.CALIB_CB_NORMALIZE_IMAGE)
-
-        if ret == True:
-            objpoints.append(objp)
-            # refining pixel coordinates for given 2d points.
-            corners2 = cv2.cornerSubPix(gray, corners, (11, 11), (-1, -1), criteria)
-            imgpoints.append(corners2)
-            # Draw and display the corners
-            img = cv2.drawChessboardCorners(img, CHECKERBOARD, corners2, ret)
-
-        cv2.waitKey(0)
-
-    cv2.destroyAllWindows()
-    h, w = img.shape[:2]
-    ret, mtx, dist, rvecs, tvecs = cv2.calibrateCamera(objpoints, imgpoints, gray.shape[::-1], None, None)
-
-    return ret, mtx, dist, rvecs, tvecs
-
 
 # **********
 # Find homographies function
@@ -690,7 +647,7 @@ def ray_intersect_dem(ray_origin, ray_direction, dem_data, max_search_dist=10000
             return None
         logging.debug(f"【DEBUG】DEM海拔: {dem_elev}, 当前高度: {current_pos[2]}")
 
-        if step_count >= 120 and current_pos[2] <= dem_elev:
+        if step_count >= 150 and current_pos[2] <= dem_elev:
             return np.array([current_easting, current_northing, current_pos[2]])
 
         current_pos[0] += step * ray_direction[0]
@@ -806,6 +763,7 @@ def read_camera_locations(camera_locations):
 
 # 将边界像素坐标转换为地理坐标
 def convert_boundary_to_geo(json_data, K, R, ray_origin, dem_data, control_points, optimization_factors):
+    boundary_points = {}
     boundary_geo_coords = {}
 
     for obj in json_data['objects']:
@@ -815,27 +773,29 @@ def convert_boundary_to_geo(json_data, K, R, ray_origin, dem_data, control_point
 
         if key not in boundary_geo_coords:
             boundary_geo_coords[key] = []
+            boundary_points[key] = []
 
-        boundary_points = obj['segmentation']
-        for pixel_x, pixel_y in boundary_points:
-            geo_coord = pixel_to_geo([pixel_x, pixel_y], K, R, ray_origin, dem_data, control_points,
-                                     optimization_factors)
+        boundary_points_obj = obj['segmentation']
+        for pixel_x, pixel_y in boundary_points_obj:
+            geo_coord = pixel_to_geo([pixel_x, pixel_y], K, R, ray_origin, dem_data, control_points, optimization_factors)
             if geo_coord.all():
                 boundary_geo_coords[key].append(geo_coord)
+                boundary_points[key].append((pixel_x, pixel_y))
 
-    return boundary_geo_coords
+    return boundary_geo_coords, boundary_points
 
 # 生成csv
-def save_boundary_to_csv(boundary_geo_coords, csv_file='boundary_points_geo.csv'):
+def save_boundary_to_csv(boundary_geo_coords, boundary_points, csv_file='boundary_points_geo.csv'):
     csv_data = []
 
     for (group, category), coords in boundary_geo_coords.items():
-        for coord in coords:
-            csv_data.append([category, group, coord[0], coord[1], coord[2]])
+        for i, coord in enumerate(coords):
+            pixel_x, pixel_y = boundary_points[(group, category)][i]
+            csv_data.append([category, group, pixel_x, pixel_y, coord[0], coord[1], coord[2]])
 
     with open(csv_file, 'w', newline='', encoding='utf-8') as f:
         writer = csv.writer(f)
-        writer.writerow(['category', 'group', 'geo_x', 'geo_y', 'geo_z'])
+        writer.writerow(['category', 'group', 'pixel_x', 'pixel_y', 'geo_x', 'geo_y', 'geo_z'])
         writer.writerows(csv_data)
 
     print(f"CSV文件已保存到 {csv_file}")
@@ -860,8 +820,6 @@ def save_boundary_to_shapefiles(boundary_geo_coords, json_data, output_dir):
             'category': category,
             'area': polygon.area,
             'perimeter': polygon.length,
-            'easting': polygon.centroid.x,
-            'northing': polygon.centroid.y
         })
 
         gdf = gpd.GeoDataFrame(attributes, geometry=geometry)
@@ -872,94 +830,10 @@ def save_boundary_to_shapefiles(boundary_geo_coords, json_data, output_dir):
         gdf.to_file(output_shp_file, driver='ESRI Shapefile')
         print(f"Shapefile已保存到 {output_shp_file}")
 
-# 创建掩码并提取区域内像素坐标
-def generate_mask_and_extract_pixels(image_name, boundary_points):
-    # 指定图像路径
-    image_path = os.path.join("historical photos", image_name)
-    print(f"Trying to open image: {image_path}")
-
-    # 读取图像
-    image = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE)
-    if image is None:
-        raise FileNotFoundError(f"Image not found: {image_path}")
-
-    # 创建掩码
-    mask = np.zeros_like(image, dtype=np.uint8)
-    boundary_points = np.array(boundary_points, dtype=np.int32)
-    cv2.fillPoly(mask, [boundary_points], 255)
-
-    # 获取区域内的所有像素点坐标
-    region_pixels = np.argwhere(mask == 255)
-
-    if region_pixels.size == 0:
-        return None
-
-    return region_pixels
-
-def sample_points(points, sample_size):
-    # 均匀采样
-    sampled_points = points[np.random.choice(points.shape[0], sample_size, replace=False)]
-    print(f"采样后的区域像素坐标数量：{sampled_points.shape[0]}")
-    return sampled_points
-
-def plot_sampled_and_boundary_points(image, sampled_points, boundary_points):
-    # 重绘采样点和边界点在照片上
-    plt.figure(figsize=(11.69, 8.27))
-    plt.imshow(image, cmap='gray')
-    plt.scatter(sampled_points[:, 1], sampled_points[:, 0], s=1, color='red', label='Sampled Points')
-    plt.scatter(boundary_points[:, 1], boundary_points[:, 0], s=1, color='blue', label='Boundary Points')
-    plt.legend()
-    plt.title("Sampled Points and Boundary Points on Image")
-    plt.show()
-
-def region_to_geo(json_data, K, R, ray_origin, dem_data, control_points, optimization_factors, image_name,
-                  sample_size=1000):
-    region_geo_coords = {}
-
-    for obj in json_data['objects']:
-        group = obj['group']
-        category = re.sub(r'[^a-zA-Z0-9]', '', obj['category'])
-        key = (group, category)
-
-        if key not in region_geo_coords:
-            region_geo_coords[key] = []
-
-        boundary_points = obj['segmentation']
-        region_pixels = generate_mask_and_extract_pixels(image_name, boundary_points)
-
-        if region_pixels is None:
-            continue
-
-        sampled_points = sample_points(region_pixels, sample_size)
-
-        for pixel_y, pixel_x in sampled_points:
-            geo_coord = pixel_to_geo([pixel_x, pixel_y], K, R, ray_origin, dem_data, control_points,
-                                     optimization_factors)
-            if geo_coord.all():
-                region_geo_coords[key].append(geo_coord)
-
-    return region_geo_coords
-
-# 可视化三维重建
-def visualize_3d(region_geo_coords):
-    fig = plt.figure()
-    ax = fig.add_subplot(111, projection='3d')
-
-    # 定义颜色映射
-    colors = plt.cm.get_cmap('tab20', len(region_geo_coords))
-
-    for idx, ((group, category), points) in enumerate(region_geo_coords.items()):
-        points = np.array(points)
-        ax.scatter(points[:, 0], points[:, 1], points[:, 2], c=[colors(idx)], label=f"{category}_{group}")
-
-    ax.legend()
-    plt.show()
-
 # **********
 # Main function
 # **********
-def do_it(image_name, json_file, features, camera_locations, pixel_x, pixel_y, output, scale, dem_file,
-          sample_size=1000):
+def do_it(image_name, json_file, features, camera_locations, pixel_x, pixel_y, output, scale, dem_file):
     # 确保工作目录为脚本所在目录
     script_dir = os.path.dirname(os.path.abspath(__file__))
     os.chdir(script_dir)
@@ -1087,23 +961,11 @@ def do_it(image_name, json_file, features, camera_locations, pixel_x, pixel_y, o
     with open(json_file, 'r', encoding='utf-8') as f:
         json_data = json.load(f)
 
-    # 生成并采样区域像素坐标
-    boundary_points = np.array([point for obj in json_data['objects'] for point in obj['segmentation']])
-    region_pixels = generate_mask_and_extract_pixels(image_name, boundary_points)
-    sampled_points = sample_points(region_pixels, sample_size)
-
-    # 调用重绘函数
-    plot_sampled_and_boundary_points(im, sampled_points, boundary_points)
-
-    # 三维重建可视化
-    region_geo_coords = region_to_geo(json_data, K, R, ray_origin, dem_data, control_points, optimization_factors, image_name, sample_size)
-    visualize_3d(region_geo_coords)
-
     # 将边界点转换为地理坐标
-    boundary_geo_coords = convert_boundary_to_geo(json_data, K, R, ray_origin, dem_data, control_points, optimization_factors)
+    boundary_geo_coords, boundary_points = convert_boundary_to_geo(json_data, K, R, ray_origin, dem_data, control_points, optimization_factors)
 
     # 保存为csv
-    save_boundary_to_csv(boundary_geo_coords)
+    save_boundary_to_csv(boundary_geo_coords, boundary_points)
 
     # 保存为Shapefile
     save_boundary_to_shapefiles(boundary_geo_coords, json_data, "output_shapefiles")
@@ -1148,7 +1010,7 @@ def main():
     ]
 
     # 指定要处理的图像信息
-    target_info = images_info[0]  # 修改此索引以选择要处理的图像，例如 0 表示处理第一个图像
+    target_info = images_info[1]  # 修改此索引以选择要处理的图像，例如 0 表示处理第一个图像
 
     do_it(
         target_info["image_name"],
